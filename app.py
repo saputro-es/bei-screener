@@ -1,258 +1,131 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+from __future__ import annotations
 
-st.set_page_config(
-    page_title="BEI Screener V3",
-    page_icon="📈",
-    layout="wide"
+from io import BytesIO
+
+import pandas as pd
+import streamlit as st
+
+from modules.analysis import screen
+from modules.database import database_info, load_data, normalize_dataframe, save_dataframe
+
+st.set_page_config(page_title="BEI Screener", page_icon="📈", layout="wide")
+
+st.title("📈 BEI Screener — Accumulation & Rally")
+st.caption("Database-backed Indonesian stock screener | Net Buy 3 hari > 65%")
+
+# Always initialize SQLite when the app starts.
+info = database_info()
+
+with st.sidebar:
+    st.header("⚙️ Pengaturan")
+    threshold = st.number_input("Batas Net Buy 3 hari (%)", min_value=0.0, max_value=100.0, value=65.0, step=1.0)
+    st.write(f"📦 Database: {info['total_rows']:,} baris")
+    st.write(f"🏷️ Saham: {info['total_stocks']:,}")
+    st.write(f"📅 Hari: {info['total_days']:,}")
+
+st.subheader("📂 1. Upload data BEI")
+files = st.file_uploader(
+    "Pilih satu atau beberapa file Excel",
+    type=["xlsx", "xls"],
+    accept_multiple_files=True,
+    help="File tidak disimpan sebagai Excel. Data langsung dinormalisasi dan disimpan ke SQLite.",
 )
 
-st.title("📈 BEI Screener V3")
-st.caption("Automatic Indonesia Stock Screener")
+if files:
+    all_frames: list[pd.DataFrame] = []
+    for file in files:
+        try:
+            raw = pd.read_excel(BytesIO(file.getvalue()))
+            normalized = normalize_dataframe(raw)
+            normalized["source_file"] = file.name
+            all_frames.append(normalized)
+            st.success(f"✅ {file.name}: {len(normalized):,} baris")
+        except Exception as exc:
+            st.error(f"❌ {file.name}: {exc}")
+
+    if all_frames:
+        uploaded = pd.concat(all_frames, ignore_index=True)
+        try:
+            saved = save_dataframe(uploaded)
+            st.success(f"💾 {saved:,} baris berhasil disimpan/di-update ke SQLite.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Gagal menyimpan data: {exc}")
 
 st.divider()
 
-st.subheader("📂 Upload Data Saham")
-uploaded_files = st.file_uploader(
-    "Pilih 1 atau beberapa file Excel",
-    type=["xlsx"],
-    accept_multiple_files=True
-)
+# Reload after any upload so the screen always uses the persistent database.
+data = load_data()
+if data.empty:
+    st.info("Belum ada data. Upload data harian BEI terlebih dahulu.")
+    st.markdown(
+        """
+### Data minimum yang dibutuhkan
+- **Kode Saham** dan **Tanggal Perdagangan Terakhir**
+- **Penutupan**, idealnya Open/High/Low dan Volume
+- **Foreign Buy** dan **Foreign Sell** untuk analisis akumulasi
 
-if uploaded_files:
-
-    frames = []
-
-    for file in uploaded_files:
-        try:
-            df = pd.read_excel(file)
-            df.columns = [str(c).strip() for c in df.columns]
-            frames.append(df)
-            st.success(f"✅ {file.name} — {len(df)} baris")
-        except Exception as e:
-            st.error(f"Gagal membaca {file.name}: {e}")
-
-    if frames:
-
-        data = pd.concat(frames, ignore_index=True)
-
-        # --------------------------------------------------
-        # DETEKSI KOLOM OTOMATIS
-        # --------------------------------------------------
-
-        def find_col(names):
-            for name in names:
-                for col in data.columns:
-                    if str(col).lower().strip() == name.lower():
-                        return col
-            for name in names:
-                for col in data.columns:
-                    if name.lower() in str(col).lower():
-                        return col
-            return None
-
-        kode_col = find_col([
-            "Kode Saham", "Kode", "Ticker", "Symbol"
-        ])
-
-        nama_col = find_col([
-            "Nama Perusahaan", "Nama", "Company"
-        ])
-
-        close_col = find_col([
-            "Penutupan", "Close", "Closing"
-        ])
-
-        open_col = find_col([
-            "Open Price", "Open"
-        ])
-
-        high_col = find_col([
-            "Tertinggi", "High"
-        ])
-
-        low_col = find_col([
-            "Terendah", "Low"
-        ])
-
-        volume_col = find_col([
-            "Volume"
-        ])
-
-        foreign_buy_col = find_col([
-            "Foreign Buy", "Foreign Buy Volume",
-            "Foreign Buy Value", "Asing Buy"
-        ])
-
-        foreign_sell_col = find_col([
-            "Foreign Sell", "Foreign Sell Volume",
-            "Foreign Sell Value", "Asing Sell"
-        ])
-
-        # --------------------------------------------------
-        # DATA GABUNGAN
-        # --------------------------------------------------
-
-        st.subheader("📊 Data Gabungan")
-        st.dataframe(
-            data,
-            use_container_width=True,
-            height=450
-        )
-
-        st.write(f"Jumlah saham/data: **{len(data)}**")
-
-        # --------------------------------------------------
-        # HITUNG NET BUY %
-        # --------------------------------------------------
-
-        if foreign_buy_col and foreign_sell_col:
-
-            buy = pd.to_numeric(
-                data[foreign_buy_col], errors="coerce"
-            ).fillna(0)
-
-            sell = pd.to_numeric(
-                data[foreign_sell_col], errors="coerce"
-            ).fillna(0)
-
-            total = buy + sell
-
-            data["Net Buy %"] = np.where(
-                total > 0,
-                (buy / total) * 100,
-                np.nan
-            )
-
-            data["Net Buy Value"] = buy - sell
-
-            # --------------------------------------------------
-            # FILTER > 65%
-            # --------------------------------------------------
-
-            hasil = data[data["Net Buy %"] > 65].copy()
-
-            hasil = hasil.sort_values(
-                "Net Buy %",
-                ascending=False
-            )
-
-            st.divider()
-            st.subheader("🔥 SAHAM LOLOS FILTER NET BUY > 65%")
-
-            if len(hasil) == 0:
-                st.warning(
-                    "Tidak ada saham dengan Net Buy > 65%."
-                )
-            else:
-
-                kolom_tampil = []
-
-                for c in [
-                    kode_col,
-                    nama_col,
-                    close_col,
-                    volume_col,
-                    foreign_buy_col,
-                    foreign_sell_col,
-                    "Net Buy %",
-                    "Net Buy Value"
-                ]:
-                    if c and c in hasil.columns:
-                        kolom_tampil.append(c)
-
-                st.dataframe(
-                    hasil[kolom_tampil],
-                    use_container_width=True,
-                    height=600
-                )
-
-                # --------------------------------------------------
-                # KATEGORI SINYAL
-                # --------------------------------------------------
-
-                hasil["Sinyal"] = np.where(
-                    hasil["Net Buy %"] >= 75,
-                    "✅ KUAT / POTENSI RALLY",
-                    np.where(
-                        hasil["Net Buy %"] >= 65,
-                        "⚠️ AKUMULASI / PERLU KONFIRMASI",
-                        "❌ RISIKO"
-                    )
-                )
-
-                st.subheader("🎯 HASIL SCREENING")
-
-                ringkas = []
-
-                for _, row in hasil.iterrows():
-
-                    kode = (
-                        row[kode_col]
-                        if kode_col
-                        else "-"
-                    )
-
-                    nama = (
-                        row[nama_col]
-                        if nama_col
-                        else "-"
-                    )
-
-                    netbuy = row["Net Buy %"]
-
-                    signal = row["Sinyal"]
-
-                    ringkas.append({
-                        "Kode": kode,
-                        "Perusahaan": nama,
-                        "Net Buy %": round(netbuy, 2),
-                        "Sinyal": signal
-                    })
-
-                st.dataframe(
-                    pd.DataFrame(ringkas),
-                    use_container_width=True
-                )
-
-        else:
-
-            st.warning(
-                "⚠️ Kolom Foreign Buy dan Foreign Sell belum ditemukan."
-            )
-
-            st.info(
-                "Data yang tersedia belum cukup untuk menghitung "
-                "Net Buy %. Silakan upload file yang memiliki "
-                "kolom Foreign Buy dan Foreign Sell."
-            )
-
-        # --------------------------------------------------
-        # DAFTAR KOLOM
-        # --------------------------------------------------
-
-        with st.expander("🔎 Lihat nama semua kolom yang terbaca"):
-            for i, col in enumerate(data.columns):
-                st.write(f"{i}: `{col}`")
-
-else:
-
-    st.info(
-        "📁 Silakan upload file Excel data saham terlebih dahulu."
+Semakin banyak hari historis yang diunggah, semakin baik indikator SMA20/SMA50, RSI14, ATR, dan analisis momentum.
+"""
     )
+    st.stop()
 
-    st.markdown("""
-### Cara kerja
+st.subheader("🗄️ Histori SQLite")
+latest_date = data["trade_date"].max()
+st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris")
 
-1. Upload 1 atau beberapa file Excel.
-2. Sistem menggabungkan seluruh data.
-3. Sistem mendeteksi kolom saham secara otomatis.
-4. Sistem menghitung **Net Buy %**.
-5. Hanya saham **> 65%** yang ditampilkan.
-6. Saham diurutkan dari Net Buy terbesar.
-7. Sistem memberikan klasifikasi:
-   - ✅ Potensi Rally
-   - ⚠️ Akumulasi / perlu konfirmasi
-   - ❌ Risiko
-""")
+screened = screen(data, threshold=threshold)
+
+st.subheader(f"🔥 Saham Net Buy 3 Hari > {threshold:.0f}%")
+if screened.empty:
+    st.warning("Belum ada saham yang lolos filter. Pastikan histori minimal 1 hari memiliki Foreign Buy/Sell.")
+else:
+    display = screened.copy()
+    display["Net Buy 3D %"] = display["net_buy_pct_3d"].round(2)
+    display["D1 %"] = display["net_buy_pct_d1"].round(2)
+    display["D2 %"] = display["net_buy_pct_d2"].round(2)
+    display["D3 %"] = display["net_buy_pct_d3"].round(2)
+    display["RSI14"] = display["rsi14"].round(1)
+    display["Vol Ratio"] = display["volume_ratio"].round(2)
+    display["Target Low"] = display["target_low"].round(0)
+    display["Target High"] = display["target_high"].round(0)
+    display["Stop Loss"] = display["stop_loss"].round(0)
+
+    cols = [
+        "stock_code", "company_name", "close_price", "Net Buy 3D %", "D1 %", "D2 %", "D3 %",
+        "days_available", "signal", "quality", "RSI14", "sma20", "sma50", "Vol Ratio",
+        "Target Low", "Target High", "Stop Loss", "reason",
+    ]
+    cols = [c for c in cols if c in display.columns]
+    st.dataframe(display[cols], use_container_width=True, hide_index=True)
+
+    st.subheader("🎯 Ringkasan sinyal")
+    for _, row in screened.head(50).iterrows():
+        with st.expander(f"{row['stock_code']} — {row.get('signal', '-') } | Net Buy 3D {row['net_buy_pct_3d']:.2f}%"):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Close", _fmt(row.get("close_price")))
+            c2.metric("RSI14", _fmt(row.get("rsi14"), 1))
+            c3.metric("SMA20", _fmt(row.get("sma20")))
+            c4.metric("Volume Ratio", _fmt(row.get("volume_ratio"), 2))
+            st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
+            st.write(f"**Alasan:** {row.get('reason', '-')}")
+            st.write(
+                f"**Target 1 minggu (indikatif):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | "
+                f"**Stop loss:** {_fmt(row.get('stop_loss'))}"
+            )
+            st.caption("Target/stop loss adalah rule-based estimate berbasis ATR, bukan jaminan harga.")
+
+st.divider()
+st.subheader("🔎 Detail histori")
+selected = st.selectbox("Pilih saham", sorted(data["stock_code"].dropna().unique()))
+stock_history = data[data["stock_code"] == selected].sort_values("trade_date", ascending=False)
+st.dataframe(stock_history, use_container_width=True, hide_index=True)
+
+
+def _fmt(value, decimals: int = 0) -> str:
+    try:
+        if pd.isna(value):
+            return "-"
+        return f"{float(value):,.{decimals}f}"
+    except (TypeError, ValueError):
+        return "-"
