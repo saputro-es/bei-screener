@@ -92,17 +92,30 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Add columns needed by the current app to databases created by older versions."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(stock_daily)").fetchall()}
     for column, sql_type in COLUMN_TYPES.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE stock_daily ADD COLUMN {column} {sql_type}")
 
-    # Migrate common legacy names when present.
-    if "close_price" in COLUMN_TYPES and "price" in existing:
+    if "price" in existing:
         conn.execute("UPDATE stock_daily SET close_price = COALESCE(close_price, price)")
-    if "company_name" in COLUMN_TYPES and "stock_name" in existing:
+    if "stock_name" in existing:
         conn.execute("UPDATE stock_daily SET company_name = COALESCE(company_name, stock_name)")
+
+    # Older versions allowed the same stock/date to be stored for multiple source files.
+    # Keep the newest row before installing the new upsert key.
+    conn.execute(
+        """
+        DELETE FROM stock_daily
+        WHERE rowid NOT IN (
+            SELECT MAX(rowid) FROM stock_daily
+            WHERE trade_date IS NOT NULL AND stock_code IS NOT NULL
+            GROUP BY trade_date, stock_code
+        )
+        AND trade_date IS NOT NULL AND stock_code IS NOT NULL
+        """
+    )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_stock_daily_date_code ON stock_daily(trade_date, stock_code)")
     conn.commit()
 
 
