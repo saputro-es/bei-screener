@@ -44,7 +44,9 @@ if uploaded_files:
     st.subheader("Data Gabungan")
 
     st.write(data_gabungan)
+    st.subheader("Nama Kolom")
 
+    st.write(data_gabungan.columns.tolist())
     st.write(f"Jumlah baris : {len(data_gabungan)}")
 
 else:
