@@ -48,21 +48,30 @@ with st.sidebar:
     st.write(f"📖 Bid/Offer: {info['orderbook_rows']:,} baris")
 
 st.subheader("📂 Upload data BEI")
-st.caption(f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256.")
+st.caption(
+    f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256. "
+    "Pilih file lalu tekan tombol Proses Upload."
+)
 
 if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
 upload_key = f"daily_upload_{st.session_state.upload_generation}"
 
-files = st.file_uploader(
-    "Pilih satu atau beberapa file Ringkasan Saham BEI",
-    type=["xlsx", "xls"],
-    accept_multiple_files=True,
-    key=upload_key,
-    help="Pilih hingga 20 file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk.",
-)
+with st.form("daily_upload_form", clear_on_submit=False):
+    files = st.file_uploader(
+        "Pilih satu atau beberapa file Ringkasan Saham BEI",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key=upload_key,
+        help="Pilih hingga 20 file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk.",
+    )
+    submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True)
 
-if files:
+if submitted:
+    if not files:
+        st.warning("Pilih minimal satu file Excel terlebih dahulu.")
+        st.stop()
+
     if len(files) > MAX_FILES_PER_BATCH:
         st.error(f"❌ Terlalu banyak file: {len(files)}. Maksimal {MAX_FILES_PER_BATCH} file per batch.")
         st.stop()
@@ -115,7 +124,6 @@ if files:
                 f"{result['rows_saved']:,} baris unik disimpan/di-update | "
                 f"{result['orderbook_rows']:,} snapshot orderbook tersimpan."
             )
-            # Reset uploader so Streamlit does not re-submit the same files on rerun.
             st.session_state.upload_generation += 1
             st.rerun()
         except Exception as exc:
