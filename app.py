@@ -10,10 +10,19 @@ from modules.database import database_info, load_data, normalize_dataframe, save
 
 st.set_page_config(page_title="BEI Screener", page_icon="📈", layout="wide")
 
+
+def _fmt(value, decimals: int = 0) -> str:
+    try:
+        if pd.isna(value):
+            return "-"
+        return f"{float(value):,.{decimals}f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
 st.title("📈 BEI Screener — Accumulation & Rally")
 st.caption("Database-backed Indonesian stock screener | Net Buy 3 hari > 65%")
 
-# Always initialize SQLite when the app starts.
 info = database_info()
 
 with st.sidebar:
@@ -53,9 +62,8 @@ if files:
             st.error(f"Gagal menyimpan data: {exc}")
 
 st.divider()
-
-# Reload after any upload so the screen always uses the persistent database.
 data = load_data()
+
 if data.empty:
     st.info("Belum ada data. Upload data harian BEI terlebih dahulu.")
     st.markdown(
@@ -75,8 +83,8 @@ latest_date = data["trade_date"].max()
 st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris")
 
 screened = screen(data, threshold=threshold)
-
 st.subheader(f"🔥 Saham Net Buy 3 Hari > {threshold:.0f}%")
+
 if screened.empty:
     st.warning("Belum ada saham yang lolos filter. Pastikan histori minimal 1 hari memiliki Foreign Buy/Sell.")
 else:
@@ -101,7 +109,7 @@ else:
 
     st.subheader("🎯 Ringkasan sinyal")
     for _, row in screened.head(50).iterrows():
-        with st.expander(f"{row['stock_code']} — {row.get('signal', '-') } | Net Buy 3D {row['net_buy_pct_3d']:.2f}%"):
+        with st.expander(f"{row['stock_code']} — {row.get('signal', '-')} | Net Buy 3D {row['net_buy_pct_3d']:.2f}%"):
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Close", _fmt(row.get("close_price")))
             c2.metric("RSI14", _fmt(row.get("rsi14"), 1))
@@ -120,12 +128,3 @@ st.subheader("🔎 Detail histori")
 selected = st.selectbox("Pilih saham", sorted(data["stock_code"].dropna().unique()))
 stock_history = data[data["stock_code"] == selected].sort_values("trade_date", ascending=False)
 st.dataframe(stock_history, use_container_width=True, hide_index=True)
-
-
-def _fmt(value, decimals: int = 0) -> str:
-    try:
-        if pd.isna(value):
-            return "-"
-        return f"{float(value):,.{decimals}f}"
-    except (TypeError, ValueError):
-        return "-"
