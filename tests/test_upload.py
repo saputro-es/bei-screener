@@ -75,7 +75,7 @@ def test_bulk_upload_upserts_and_preserves_existing_non_null(monkeypatch, tmp_pa
 
 def test_existing_hashes(monkeypatch, tmp_path):
     _use_temp_db(monkeypatch, tmp_path)
-    upload.existing_hashes([])
+    upload.existing_hashes(["seed"])
     with sqlite3.connect(upload.DATABASE_FILE) as conn:
         conn.execute(
             "INSERT INTO upload_ledger (sha256, filename, size_bytes, rows_read, rows_saved) "
