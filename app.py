@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from modules.analysis import HORIZONS, screen
-from modules.database import database_info, load_data, normalize_dataframe, save_dataframe
+from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, normalize_dataframe, save_dataframe
 from modules.orderbook import summarize_orderbook
 
 st.set_page_config(page_title="BEI Screener V4", page_icon="📈", layout="wide")
@@ -22,18 +22,18 @@ def _fmt(value, decimals: int = 0) -> str:
 
 
 def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
-    """Build a latest-orderbook snapshot from Bid/Offer columns in the main BEI dataset."""
-    required = {"trade_date", "stock_code", "bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"}
+    """Build the latest five-level orderbook snapshot from the canonical BEI dataset."""
+    required = {"trade_date", "stock_code", *DAILY_ORDERBOOK_COLUMNS}
     if data.empty or not required.issubset(data.columns):
         return pd.DataFrame()
-    ob = data[["trade_date", "stock_code", "bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].copy()
-    ob = ob.rename(columns={"trade_date": "snapshot_date"})
-    ob["snapshot_time"] = "00:00:00"
-    return ob
+    available = data[["trade_date", "stock_code"] + DAILY_ORDERBOOK_COLUMNS].copy()
+    available = available.rename(columns={"trade_date": "snapshot_date"})
+    available["snapshot_time"] = "00:00:00"
+    return available[["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS]
 
 
 st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
-st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + Bid/Offer snapshot")
+st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + five-level Bid/Offer snapshot")
 
 info = database_info()
 with st.sidebar:
@@ -50,7 +50,7 @@ files = st.file_uploader(
     type=["xlsx", "xls"],
     accept_multiple_files=True,
     key="daily_upload",
-    help="Satu file sudah mencakup harga, volume, foreign flow, Bid, Bid Volume, Offer, dan Offer Volume bila kolom tersebut tersedia.",
+    help="Satu file dapat mencakup harga, volume, foreign flow, serta Bid/Offer level 1-5 bila kolom tersebut tersedia.",
 )
 
 if files:
@@ -61,7 +61,8 @@ if files:
             normalized = normalize_dataframe(raw)
             all_frames.append(normalized)
             ob_count = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
-            st.success(f"✅ {file.name}: {len(normalized):,} baris | Bid/Offer lengkap: {ob_count:,}")
+            level_count = int(normalized[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1).sum())
+            st.success(f"✅ {file.name}: {len(normalized):,} baris | Bid/Offer L1 lengkap: {ob_count:,} | Orderbook L1-L5 tersedia: {level_count:,}")
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
     if all_frames:
@@ -86,7 +87,7 @@ if data.empty:
 - Foreign Buy + Foreign Sell
 
 ### Untuk kualitas penuh blueprint
-Upload **≥200 hari bursa** agar horizon 200D aktif. Jika file BEI menyertakan Bid, Bid Volume, Offer, dan Offer Volume, semuanya otomatis digunakan sebagai orderbook snapshot.
+Upload **≥200 hari bursa** agar horizon 200D aktif. Jika file BEI menyertakan Bid/Offer level 1-5, semuanya otomatis digunakan sebagai orderbook snapshot; tidak perlu upload orderbook kedua.
 """)
     st.stop()
 
@@ -106,13 +107,14 @@ else:
     display["RSI14"] = display["rsi14"].round(1)
     display["Vol Ratio"] = display["volume_ratio"].round(2)
     display["OB Pressure %"] = display["book_pressure_pct"].round(2) if "book_pressure_pct" in display else pd.NA
+    display["OB Imbalance %"] = display["orderbook_imbalance_pct"].round(2) if "orderbook_imbalance_pct" in display else pd.NA
     display["Score"] = display["score"].round(2)
     display["Target Low"] = display["target_low"].round(0)
     display["Target High"] = display["target_high"].round(0)
     display["Stop Loss"] = display["stop_loss"].round(0)
 
     cols = ["stock_code", "company_name", "close_price"] + [f"NB {d}D %" for d in HORIZONS] + [
-        "signal", "quality", "Score", "RSI14", "Vol Ratio", "OB Pressure %", "orderbook_signal",
+        "signal", "quality", "Score", "RSI14", "Vol Ratio", "OB Pressure %", "OB Imbalance %", "orderbook_signal",
         "Target Low", "Target High", "Stop Loss",
     ]
     cols = [c for c in cols if c in display.columns]
@@ -135,7 +137,7 @@ else:
                 col.metric(f"NB {days}D", _fmt(value, 1), f"{int(available)}/{days} hari" if pd.notna(value) else "-")
 
             st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
-            st.write(f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Score {row.get('orderbook_score', 0):.1f}")
+            st.write(f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Pressure {row.get('book_pressure_pct', float('nan')):.2f}% | Imbalance {row.get('orderbook_imbalance_pct', float('nan')):.2f}%")
             st.write(f"**Alasan:** {row.get('reason', '-')}")
             st.write(f"**Target 1 minggu (indikatif):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
 
