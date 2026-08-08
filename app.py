@@ -6,8 +6,9 @@ import pandas as pd
 import streamlit as st
 
 from modules.analysis import HORIZONS, screen
-from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, normalize_dataframe, save_dataframe
+from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, normalize_dataframe
 from modules.orderbook import summarize_orderbook
+from modules.upload import MAX_FILES_PER_BATCH, existing_hashes, save_upload_batch, sha256_bytes
 
 st.set_page_config(page_title="BEI Screener V4", page_icon="📈", layout="wide")
 
@@ -47,33 +48,79 @@ with st.sidebar:
     st.write(f"📖 Bid/Offer: {info['orderbook_rows']:,} baris")
 
 st.subheader("📂 Upload data BEI")
+st.caption(f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256.")
+
+if "upload_generation" not in st.session_state:
+    st.session_state.upload_generation = 0
+upload_key = f"daily_upload_{st.session_state.upload_generation}"
+
 files = st.file_uploader(
     "Pilih satu atau beberapa file Ringkasan Saham BEI",
     type=["xlsx", "xls"],
     accept_multiple_files=True,
-    key="daily_upload",
-    help="Satu file dapat mencakup harga, volume, foreign flow, serta Bid/Offer level 1-5 bila kolom tersebut tersedia.",
+    key=upload_key,
+    help="Pilih hingga 20 file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk.",
 )
 
 if files:
+    if len(files) > MAX_FILES_PER_BATCH:
+        st.error(f"❌ Terlalu banyak file: {len(files)}. Maksimal {MAX_FILES_PER_BATCH} file per batch.")
+        st.stop()
+
+    file_hashes = {file.name: sha256_bytes(file.getvalue()) for file in files}
+    already_uploaded = existing_hashes(file_hashes.values())
+    new_files = [file for file in files if file_hashes[file.name] not in already_uploaded]
+
+    if already_uploaded:
+        st.info(f"♻️ {len(already_uploaded)} file sudah ada di database dan tidak akan diproses ulang.")
+
+    if not new_files:
+        st.success("Semua file yang dipilih sudah pernah diimpor. Tidak ada pekerjaan database yang diulang.")
+        st.session_state.upload_generation += 1
+        st.rerun()
+
     all_frames: list[pd.DataFrame] = []
-    for file in files:
+    file_records: list[dict] = []
+    progress = st.progress(0, text=f"Membaca 0/{len(new_files)} file...")
+
+    for index, file in enumerate(new_files, start=1):
         try:
             raw = pd.read_excel(BytesIO(file.getvalue()))
             normalized = normalize_dataframe(raw)
+            if normalized.empty:
+                raise ValueError("File tidak berisi baris data.")
             all_frames.append(normalized)
             ob_count = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
             level_count = int(normalized[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1).sum())
+            file_records.append({
+                "sha256": file_hashes[file.name],
+                "filename": file.name,
+                "size_bytes": len(file.getvalue()),
+                "rows_read": len(normalized),
+                "rows_saved": len(normalized),
+            })
             st.success(f"✅ {file.name}: {len(normalized):,} baris | Bid/Offer L1 lengkap: {ob_count:,} | Orderbook L1-L5 tersedia: {level_count:,}")
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
+        finally:
+            progress.progress(index / len(new_files), text=f"Membaca {index}/{len(new_files)} file...")
+
     if all_frames:
         try:
-            saved = save_dataframe(pd.concat(all_frames, ignore_index=True))
-            st.success(f"💾 {saved:,} baris berhasil disimpan/di-update ke SQLite.")
+            with st.spinner("💾 Menulis batch ke SQLite secara bulk..."):
+                result = save_upload_batch(all_frames, file_records)
+            progress.empty()
+            st.success(
+                f"💾 Selesai: {result['files_saved']} file | "
+                f"{result['rows_saved']:,} baris unik disimpan/di-update | "
+                f"{result['orderbook_rows']:,} snapshot orderbook tersimpan."
+            )
+            # Reset uploader so Streamlit does not re-submit the same files on rerun.
+            st.session_state.upload_generation += 1
             st.rerun()
         except Exception as exc:
-            st.error(f"Gagal menyimpan data: {exc}")
+            progress.empty()
+            st.error(f"❌ Gagal menyimpan batch. Tidak ada commit parsial: {exc}")
 
 st.divider()
 data = load_data()
