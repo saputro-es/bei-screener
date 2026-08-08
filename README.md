@@ -18,9 +18,11 @@ Technical confirmation includes:
 - ATR14
 - rule-based one-week target and stop-loss reference
 
-## Orderbook is a first-class signal
+## Orderbook is a first-class confirmation signal
 
-Orderbook snapshots are stored separately in SQLite so multiple intraday snapshots do not collide with the daily OHLC/foreign-flow table. The engine summarizes the latest snapshot per stock using:
+The application accepts the **embedded Bid/Offer columns in the main BEI dataset**, so users do not need to upload a duplicate orderbook file. When those columns exist, they are normalized into the SQLite `orderbook_snapshot` table automatically. The storage layer also supports multiple intraday snapshots for a future realtime/API feed.
+
+The engine summarizes the latest snapshot per stock using:
 
 - Best Bid / Best Offer
 - spread and spread %
@@ -51,8 +53,9 @@ Daily data should ideally include:
 - `Tertinggi`, `Terendah`, `Open Price`
 - `Volume`
 - `Foreign Buy`, `Foreign Sell`
+- Bid/Offer price + volume for levels 1–5 when available
 
-Orderbook should ideally contain timestamp, ticker, and Bid/Offer price + volume for levels 1–5. The normalizer accepts common Indonesian/English column variants.
+The normalizer accepts common Indonesian/English column variants.
 
 ## Run locally
 
@@ -67,7 +70,7 @@ streamlit run app.py
 pytest -q
 ```
 
-GitHub Actions runs the test suite on pushes and pull requests.
+GitHub Actions runs compile checks and the test suite on pushes and pull requests.
 
 ## Important
 
