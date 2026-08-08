@@ -6,15 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from modules.analysis import HORIZONS, screen
-from modules.database import (
-    database_info,
-    load_data,
-    load_orderbook,
-    normalize_dataframe,
-    normalize_orderbook_dataframe,
-    save_dataframe,
-    save_orderbook,
-)
+from modules.database import database_info, load_data, normalize_dataframe, save_dataframe
 from modules.orderbook import summarize_orderbook
 
 st.set_page_config(page_title="BEI Screener V4", page_icon="📈", layout="wide")
@@ -29,26 +21,36 @@ def _fmt(value, decimals: int = 0) -> str:
         return "-"
 
 
-st.title("📈 BEI Screener — Multi-Horizon Accumulation + Orderbook")
-st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + orderbook")
+def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
+    """Build a latest-orderbook snapshot from Bid/Offer columns in the main BEI dataset."""
+    required = {"trade_date", "stock_code", "bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"}
+    if data.empty or not required.issubset(data.columns):
+        return pd.DataFrame()
+    ob = data[["trade_date", "stock_code", "bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].copy()
+    ob = ob.rename(columns={"trade_date": "snapshot_date"})
+    ob["snapshot_time"] = "00:00:00"
+    return ob
+
+
+st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
+st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + Bid/Offer snapshot")
 
 info = database_info()
-
 with st.sidebar:
     st.header("⚙️ Pengaturan")
     threshold = st.number_input("Filter Net Buy 3D (%)", min_value=0.0, max_value=100.0, value=65.0, step=1.0)
     st.write(f"📦 Database: {info['total_rows']:,} baris")
     st.write(f"🏷️ Saham: {info['total_stocks']:,}")
     st.write(f"📅 Hari: {info['total_days']:,}")
-    st.write(f"📖 Orderbook: {info['orderbook_rows']:,} snapshot")
+    st.write(f"📖 Bid/Offer: {info['orderbook_rows']:,} baris")
 
-st.subheader("📂 1. Upload data harian BEI")
+st.subheader("📂 Upload data BEI")
 files = st.file_uploader(
-    "Pilih satu atau beberapa file Excel harga/foreign flow",
+    "Pilih satu atau beberapa file Ringkasan Saham BEI",
     type=["xlsx", "xls"],
     accept_multiple_files=True,
     key="daily_upload",
-    help="Data dinormalisasi dan disimpan permanen ke SQLite berdasarkan (tanggal, kode saham).",
+    help="Satu file sudah mencakup harga, volume, foreign flow, Bid, Bid Volume, Offer, dan Offer Volume bila kolom tersebut tersedia.",
 )
 
 if files:
@@ -57,53 +59,26 @@ if files:
         try:
             raw = pd.read_excel(BytesIO(file.getvalue()))
             normalized = normalize_dataframe(raw)
-            normalized["source_file"] = file.name
             all_frames.append(normalized)
-            st.success(f"✅ {file.name}: {len(normalized):,} baris")
+            ob_count = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
+            st.success(f"✅ {file.name}: {len(normalized):,} baris | Bid/Offer lengkap: {ob_count:,}")
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
     if all_frames:
         try:
             saved = save_dataframe(pd.concat(all_frames, ignore_index=True))
-            st.success(f"💾 {saved:,} baris harian berhasil disimpan/di-update ke SQLite.")
+            st.success(f"💾 {saved:,} baris berhasil disimpan/di-update ke SQLite.")
             st.rerun()
         except Exception as exc:
-            st.error(f"Gagal menyimpan data harian: {exc}")
-
-st.subheader("📖 2. Upload Orderbook")
-ob_files = st.file_uploader(
-    "Pilih satu atau beberapa file Excel orderbook",
-    type=["xlsx", "xls"],
-    accept_multiple_files=True,
-    key="orderbook_upload",
-    help="Bisa berisi Bid/Offer level 1–5. Minimal Kode Saham + Bid/Offer terbaik atau volume Bid/Offer.",
-)
-
-if ob_files:
-    ob_frames: list[pd.DataFrame] = []
-    for file in ob_files:
-        try:
-            raw = pd.read_excel(BytesIO(file.getvalue()))
-            normalized = normalize_orderbook_dataframe(raw)
-            ob_frames.append(normalized)
-            st.success(f"✅ Orderbook {file.name}: {len(normalized):,} snapshot")
-        except Exception as exc:
-            st.error(f"❌ Orderbook {file.name}: {exc}")
-    if ob_frames:
-        try:
-            saved = save_orderbook(pd.concat(ob_frames, ignore_index=True))
-            st.success(f"💾 {saved:,} snapshot orderbook berhasil disimpan ke SQLite.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Gagal menyimpan orderbook: {exc}")
+            st.error(f"Gagal menyimpan data: {exc}")
 
 st.divider()
 data = load_data()
-orderbook_raw = load_orderbook(latest_only=True)
+orderbook_raw = _embedded_orderbook(data)
 orderbook = summarize_orderbook(orderbook_raw)
 
 if data.empty:
-    st.info("Belum ada data harian. Upload histori BEI terlebih dahulu.")
+    st.info("Belum ada data. Upload histori BEI terlebih dahulu.")
     st.markdown("""
 ### Data minimum
 - Kode Saham + Tanggal
@@ -111,13 +86,13 @@ if data.empty:
 - Foreign Buy + Foreign Sell
 
 ### Untuk kualitas penuh blueprint
-Upload **≥200 hari bursa** agar horizon 200D benar-benar aktif, serta upload orderbook level 1–5 jika tersedia.
+Upload **≥200 hari bursa** agar horizon 200D aktif. Jika file BEI menyertakan Bid, Bid Volume, Offer, dan Offer Volume, semuanya otomatis digunakan sebagai orderbook snapshot.
 """)
     st.stop()
 
 st.subheader("🗄️ Histori SQLite")
 latest_date = data["trade_date"].max()
-st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris | Orderbook aktif: **{len(orderbook):,} saham**")
+st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris | Bid/Offer aktif: **{len(orderbook):,} saham**")
 
 screened = screen(data, threshold=threshold, orderbook=orderbook)
 st.subheader(f"🔥 Kandidat: Net Buy 3D > {threshold:.0f}% + Multi-Horizon 3D–200D")
@@ -160,7 +135,7 @@ else:
                 col.metric(f"NB {days}D", _fmt(value, 1), f"{int(available)}/{days} hari" if pd.notna(value) else "-")
 
             st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
-            st.write(f"**Orderbook:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Score {row.get('orderbook_score', 0):.1f}")
+            st.write(f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Score {row.get('orderbook_score', 0):.1f}")
             st.write(f"**Alasan:** {row.get('reason', '-')}")
             st.write(f"**Target 1 minggu (indikatif):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
 
@@ -170,8 +145,8 @@ selected = st.selectbox("Pilih saham", sorted(data["stock_code"].dropna().unique
 stock_history = data[data["stock_code"] == selected].sort_values("trade_date", ascending=False)
 st.dataframe(stock_history, use_container_width=True, hide_index=True)
 
-st.subheader("📖 Orderbook terbaru")
+st.subheader("📖 Bid/Offer terbaru dari file BEI")
 if orderbook.empty:
-    st.info("Belum ada snapshot orderbook. Upload data orderbook untuk mengaktifkan tekanan Bid/Offer.")
+    st.info("File BEI belum menyediakan Bid/Offer yang lengkap.")
 else:
     st.dataframe(orderbook.sort_values("book_pressure_pct", ascending=False), use_container_width=True, hide_index=True)
