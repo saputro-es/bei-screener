@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sqlite3
 
 import numpy as np
@@ -76,6 +78,7 @@ def test_screen_filters_3d_but_scores_long_horizons():
     assert "score" in result.columns
     assert "target_low" in result.columns
     assert "stop_loss" in result.columns
+    assert (result["technical_status"] == "✅ TEKNIKAL LENGKAP").all()
 
 
 def test_orderbook_pressure_is_computed():
@@ -91,6 +94,23 @@ def test_orderbook_pressure_is_computed():
     assert row["orderbook_score"] == 2
     assert row["best_bid"] == 1000
     assert row["best_ask"] == 1005
+    assert row["orderbook_status"] == "PRICE + SEBAGIAN VOLUME"
+
+
+def test_price_only_orderbook_never_gets_depth_score():
+    raw = pd.DataFrame([
+        {"Tanggal": "2026-08-07", "Waktu": "09:30:00", "Kode Saham": "AAA",
+         "Bid Price 1": 1000, "Ask Price 1": 1005,
+         "Bid Price 2": 995, "Ask Price 2": 1010},
+    ])
+    normalized = db.normalize_orderbook_dataframe(raw)
+    result = summarize_orderbook(normalized)
+    row = result.iloc[0]
+    assert row["best_bid"] == 1000
+    assert row["best_ask"] == 1005
+    assert np.isnan(row["book_pressure_pct"])
+    assert row["orderbook_score"] == 0
+    assert row["orderbook_status"] == "PRICE LEVEL SAJA"
 
 
 def test_empty_orderbook_rows_do_not_look_like_valid_snapshots():
@@ -129,6 +149,16 @@ def test_indicators_require_full_window_and_handle_no_loss_rsi():
     assert aaa["sma50"].isna().all()
     assert aaa["sma200"].isna().all()
     assert np.isclose(aaa["rsi14"].iloc[-1], 100.0)
+
+
+def test_short_history_is_explicitly_marked_not_fabricated():
+    data = normalize_dataframe(sample_data(7))
+    result = screen(data, threshold=65)
+    assert not result.empty
+    assert result["history_days"].eq(7).all()
+    assert result["technical_status"].str.startswith("⏳ HISTORI BELUM CUKUP").all()
+    assert result["rsi14"].isna().all()
+    assert result["sma20"].isna().all()
 
 
 def test_legacy_sqlite_schema_is_migrated(tmp_path, monkeypatch):
