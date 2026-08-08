@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 import modules.database as db
-from modules.analysis import HORIZONS, accumulation_horizons, screen, three_day_accumulation
+from modules.analysis import HORIZONS, accumulation_horizons, add_indicators, screen, three_day_accumulation
 from modules.database import normalize_dataframe
 from modules.orderbook import summarize_orderbook
 
@@ -81,6 +81,37 @@ def test_orderbook_pressure_is_computed():
     assert row["orderbook_score"] == 2
     assert row["best_bid"] == 1000
     assert row["best_ask"] == 1005
+
+
+def test_embedded_dataframe_preserves_orderbook_levels_1_to_5():
+    raw = sample_data(3)
+    raw["Bid Price 1"] = 1000
+    raw["Bid Volume 1"] = 900
+    raw["Offer Price 1"] = 1005
+    raw["Offer Volume 1"] = 100
+    raw["Bid Price 2"] = 995
+    raw["Bid Volume 2"] = 500
+    raw["Offer Price 2"] = 1010
+    raw["Offer Volume 2"] = 100
+    raw["Bid Price 5"] = 980
+    raw["Bid Volume 5"] = 50
+    raw["Offer Price 5"] = 1025
+    raw["Offer Volume 5"] = 25
+    normalized = normalize_dataframe(raw)
+    assert normalized["bid_price_1"].notna().all()
+    assert normalized["bid_volume_2"].notna().all()
+    assert normalized["ask_price_5"].notna().all()
+    assert normalized["ask_volume_5"].notna().all()
+
+
+def test_indicators_require_full_window_and_handle_no_loss_rsi():
+    data = normalize_dataframe(sample_data(30))
+    indicators = add_indicators(data)
+    aaa = indicators[indicators["stock_code"] == "AAA"].sort_values("trade_date")
+    assert aaa["sma20"].iloc[:19].isna().all()
+    assert aaa["sma50"].isna().all()
+    assert aaa["sma200"].isna().all()
+    assert np.isclose(aaa["rsi14"].iloc[-1], 100.0)
 
 
 def test_legacy_sqlite_schema_is_migrated(tmp_path, monkeypatch):
