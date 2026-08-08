@@ -23,7 +23,7 @@ def _fmt(value, decimals: int = 0) -> str:
 
 
 def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
-    """Build the latest five-level orderbook snapshot from the canonical BEI dataset."""
+    """Build the latest five-level orderbook snapshots from the canonical BEI dataset."""
     required = {"trade_date", "stock_code", *DAILY_ORDERBOOK_COLUMNS}
     if data.empty or not required.issubset(data.columns):
         return pd.DataFrame()
@@ -31,7 +31,7 @@ def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
     available = available.rename(columns={"trade_date": "snapshot_date"})
     available["snapshot_time"] = "00:00:00"
     available = available[["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS]
-    available = available[available[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1)]
+    available = available[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1).to_frame("valid").join(available).loc[lambda x: x["valid"]].drop(columns="valid")
     return available
 
 
@@ -45,7 +45,7 @@ with st.sidebar:
     st.write(f"📦 Database: {info['total_rows']:,} baris")
     st.write(f"🏷️ Saham: {info['total_stocks']:,}")
     st.write(f"📅 Hari: {info['total_days']:,}")
-    st.write(f"📖 Bid/Offer: {info['orderbook_rows']:,} baris")
+    st.write(f"📖 Snapshot Bid/Offer: {info['orderbook_rows']:,} baris")
 
 st.subheader("📂 Upload data BEI")
 st.caption(
@@ -63,7 +63,7 @@ with st.form("daily_upload_form", clear_on_submit=False):
         type=["xlsx", "xls"],
         accept_multiple_files=True,
         key=upload_key,
-        help="Pilih hingga 20 file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk.",
+        help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk.",
     )
     submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True)
 
@@ -99,8 +99,9 @@ if submitted:
             if normalized.empty:
                 raise ValueError("File tidak berisi baris data.")
             all_frames.append(normalized)
-            ob_count = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
-            level_count = int(normalized[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1).sum())
+            l1_complete = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
+            price_levels = int(normalized[DAILY_ORDERBOOK_COLUMNS].notna().sum(axis=1).gt(0).sum())
+            volume_levels = int(normalized[[c for c in DAILY_ORDERBOOK_COLUMNS if "volume" in c]].notna().sum(axis=1).gt(0).sum())
             file_records.append({
                 "sha256": file_sha,
                 "filename": file.name,
@@ -108,7 +109,11 @@ if submitted:
                 "rows_read": len(normalized),
                 "rows_saved": len(normalized),
             })
-            st.success(f"✅ {file.name}: {len(normalized):,} baris | Bid/Offer L1 lengkap: {ob_count:,} | Orderbook L1-L5 tersedia: {level_count:,}")
+            st.success(
+                f"✅ {file.name}: {len(normalized):,} baris | "
+                f"L1 price+volume lengkap: {l1_complete:,} | "
+                f"snapshot price level: {price_levels:,} | snapshot volume: {volume_levels:,}"
+            )
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
         finally:
@@ -150,7 +155,15 @@ Upload **≥200 hari bursa** agar horizon 200D aktif. Jika file BEI menyertakan 
 
 st.subheader("🗄️ Histori SQLite")
 latest_date = data["trade_date"].max()
-st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris | Bid/Offer aktif: **{len(orderbook):,} saham**")
+st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris | Snapshot Bid/Offer: **{len(orderbook):,} saham**")
+
+if len(data["trade_date"].unique()) < 200:
+    days_available = int(data["trade_date"].nunique())
+    st.warning(
+        f"⏳ Histori saat ini baru **{days_available}/200 hari bursa**. "
+        "RSI14/SMA20/SMA50/SMA200/Volume20/ATR14 yang belum memenuhi window akan sengaja tetap kosong — aplikasi tidak mengarang angka. "
+        "Upload histori berikutnya untuk mengaktifkan teknikal penuh."
+    )
 
 screened = screen(data, threshold=threshold, orderbook=orderbook)
 st.subheader(f"🔥 Kandidat: Net Buy 3D > {threshold:.0f}% + Multi-Horizon 3D–200D")
@@ -162,6 +175,9 @@ else:
     for days in HORIZONS:
         display[f"NB {days}D %"] = display[f"net_buy_pct_{days}d"].round(2)
     display["RSI14"] = display["rsi14"].round(1)
+    display["SMA20"] = display["sma20"].round(0)
+    display["SMA50"] = display["sma50"].round(0)
+    display["SMA200"] = display["sma200"].round(0)
     display["Vol Ratio"] = display["volume_ratio"].round(2)
     display["OB Pressure %"] = display["book_pressure_pct"].round(2) if "book_pressure_pct" in display else pd.NA
     display["OB Imbalance %"] = display["orderbook_imbalance_pct"].round(2) if "orderbook_imbalance_pct" in display else pd.NA
@@ -171,7 +187,8 @@ else:
     display["Stop Loss"] = display["stop_loss"].round(0)
 
     cols = ["stock_code", "company_name", "close_price"] + [f"NB {d}D %" for d in HORIZONS] + [
-        "signal", "quality", "Score", "RSI14", "Vol Ratio", "OB Pressure %", "OB Imbalance %", "orderbook_signal",
+        "signal", "quality", "Score", "technical_status", "RSI14", "SMA20", "SMA50", "SMA200", "Vol Ratio",
+        "OB Pressure %", "OB Imbalance %", "orderbook_signal", "orderbook_status",
         "Target Low", "Target High", "Stop Loss",
     ]
     cols = [c for c in cols if c in display.columns]
@@ -187,6 +204,8 @@ else:
             c4.metric("Vol Ratio", _fmt(row.get("volume_ratio"), 2))
             c5.metric("OB Pressure", _fmt(row.get("book_pressure_pct"), 1))
 
+            st.info(f"**Technical readiness:** {row.get('technical_status', '-')}")
+
             horizon_cols = st.columns(len(HORIZONS))
             for col, days in zip(horizon_cols, HORIZONS):
                 value = row.get(f"net_buy_pct_{days}d")
@@ -194,7 +213,12 @@ else:
                 col.metric(f"NB {days}D", _fmt(value, 1), f"{int(available)}/{days} hari" if pd.notna(value) else "-")
 
             st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
-            st.write(f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Pressure {row.get('book_pressure_pct', float('nan')):.2f}% | Imbalance {row.get('orderbook_imbalance_pct', float('nan')):.2f}%")
+            st.write(
+                f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | "
+                f"Status: {row.get('orderbook_status', '-')} | "
+                f"Pressure {row.get('book_pressure_pct', float('nan')):.2f}% | "
+                f"Imbalance {row.get('orderbook_imbalance_pct', float('nan')):.2f}%"
+            )
             st.write(f"**Alasan:** {row.get('reason', '-')}")
             st.write(f"**Target 1 minggu (indikatif):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
 
@@ -206,6 +230,6 @@ st.dataframe(stock_history, use_container_width=True, hide_index=True)
 
 st.subheader("📖 Bid/Offer terbaru dari file BEI")
 if orderbook.empty:
-    st.info("File BEI belum menyediakan Bid/Offer yang lengkap.")
+    st.info("File BEI belum menyediakan level Bid/Offer yang dapat dibaca.")
 else:
-    st.dataframe(orderbook.sort_values("book_pressure_pct", ascending=False), use_container_width=True, hide_index=True)
+    st.dataframe(orderbook.sort_values(["orderbook_status", "book_pressure_pct"], ascending=[True, False]), use_container_width=True, hide_index=True)
