@@ -3,15 +3,26 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+HORIZONS = (3, 5, 10, 20, 60, 100, 200)
+
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
+    delta = pd.to_numeric(series, errors="coerce").diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
+
+
+def _atr_group(group: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = pd.to_numeric(group["high_price"], errors="coerce")
+    low = pd.to_numeric(group["low_price"], errors="coerce")
+    close = pd.to_numeric(group["close_price"], errors="coerce")
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.rolling(period, min_periods=5).mean().set_axis(group.index)
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -24,55 +35,20 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     data = data.sort_values(["stock_code", "trade_date"]).copy()
     groups = data.groupby("stock_code", group_keys=False)
-    data["sma20"] = groups["close_price"].transform(lambda s: s.rolling(20, min_periods=5).mean())
-    data["sma50"] = groups["close_price"].transform(lambda s: s.rolling(50, min_periods=10).mean())
+    for period in (20, 50, 200):
+        data[f"sma{period}"] = groups["close_price"].transform(lambda s, p=period: s.rolling(p, min_periods=max(5, min(p, 20))).mean())
     data["rsi14"] = groups["close_price"].transform(_rsi)
     data["volume_ma20"] = groups["volume"].transform(lambda s: s.rolling(20, min_periods=5).mean())
     data["volume_ratio"] = data["volume"] / data["volume_ma20"].replace(0, np.nan)
-    data["atr14"] = groups.apply(_atr_group).reset_index(level=0, drop=True)
+    atr_parts = []
+    for _, group in data.groupby("stock_code", sort=False):
+        atr_parts.append(_atr_group(group))
+    if atr_parts:
+        atr = pd.concat(atr_parts).sort_index()
+        data["atr14"] = atr
+    else:
+        data["atr14"] = np.nan
     return data.reset_index(drop=True)
-
-
-def _atr_group(group: pd.DataFrame) -> pd.Series:
-    high = pd.to_numeric(group["high_price"], errors="coerce")
-    low = pd.to_numeric(group["low_price"], errors="coerce")
-    close = pd.to_numeric(group["close_price"], errors="coerce")
-    prev_close = close.shift(1)
-    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    return tr.rolling(14, min_periods=5).mean().set_axis(group.index)
-
-
-def three_day_accumulation(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame()
-    data = df.copy()
-    for col in ["foreign_buy", "foreign_sell"]:
-        if col not in data:
-            data[col] = 0.0
-    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
-    data = data.dropna(subset=["stock_code", "trade_date"]).sort_values(["stock_code", "trade_date"])
-    data["foreign_buy"] = pd.to_numeric(data["foreign_buy"], errors="coerce").fillna(0)
-    data["foreign_sell"] = pd.to_numeric(data["foreign_sell"], errors="coerce").fillna(0)
-
-    rows = []
-    for code, group in data.groupby("stock_code"):
-        recent = group.tail(3)
-        buy = recent["foreign_buy"].sum()
-        sell = recent["foreign_sell"].sum()
-        total = buy + sell
-        rows.append({
-            "stock_code": code,
-            "days_available": len(recent),
-            "latest_date": recent["trade_date"].max(),
-            "net_buy_3d": buy - sell,
-            "net_buy_pct_3d": (buy / total * 100) if total > 0 else np.nan,
-            "foreign_buy_3d": buy,
-            "foreign_sell_3d": sell,
-            "net_buy_pct_d1": _net_pct(recent.iloc[-1]),
-            "net_buy_pct_d2": _net_pct(recent.iloc[-2]) if len(recent) >= 2 else np.nan,
-            "net_buy_pct_d3": _net_pct(recent.iloc[-3]) if len(recent) >= 3 else np.nan,
-        })
-    return pd.DataFrame(rows)
 
 
 def _net_pct(row: pd.Series) -> float:
@@ -82,52 +58,150 @@ def _net_pct(row: pd.Series) -> float:
     return buy / total * 100 if total > 0 else np.nan
 
 
-def classify_stock(history: pd.DataFrame, accumulation: pd.Series) -> dict:
+def accumulation_horizons(df: pd.DataFrame, horizons: tuple[int, ...] = HORIZONS) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    data = df.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    for col in ("foreign_buy", "foreign_sell"):
+        if col not in data:
+            data[col] = 0.0
+        data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0.0)
+    data = data.dropna(subset=["stock_code", "trade_date"]).sort_values(["stock_code", "trade_date"])
+
+    rows: list[dict] = []
+    for code, group in data.groupby("stock_code"):
+        group = group.drop_duplicates("trade_date", keep="last")
+        row: dict = {"stock_code": code, "latest_date": group["trade_date"].max()}
+        for days in horizons:
+            recent = group.tail(days)
+            buy = recent["foreign_buy"].sum()
+            sell = recent["foreign_sell"].sum()
+            total = buy + sell
+            pct = buy / total * 100 if total > 0 else np.nan
+            row[f"days_available_{days}d"] = len(recent)
+            row[f"net_buy_{days}d"] = buy - sell
+            row[f"net_buy_pct_{days}d"] = pct
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def three_day_accumulation(df: pd.DataFrame) -> pd.DataFrame:
+    """Backward-compatible view of the 3D horizon."""
+    data = accumulation_horizons(df, (3,))
+    if data.empty:
+        return data
+    return data.rename(columns={
+        "days_available_3d": "days_available",
+        "net_buy_3d": "net_buy_3d",
+        "net_buy_pct_3d": "net_buy_pct_3d",
+    }).assign(
+        foreign_buy_3d=lambda x: x["net_buy_3d"].where(False, np.nan),
+        foreign_sell_3d=lambda x: x["net_buy_3d"].where(False, np.nan),
+    )
+
+
+def _horizon_strength(row: pd.Series) -> tuple[float, int, int]:
+    score = 0.0
+    available = 0
+    strong = 0
+    weights = {3: 2.0, 5: 1.5, 10: 1.5, 20: 1.25, 60: 1.0, 100: 0.75, 200: 0.5}
+    for days, weight in weights.items():
+        pct = row.get(f"net_buy_pct_{days}d", np.nan)
+        n = row.get(f"days_available_{days}d", 0)
+        if not np.isfinite(pct) or n < days:
+            continue
+        available += 1
+        if pct >= 75:
+            score += 2.0 * weight
+            strong += 1
+        elif pct > 65:
+            score += 1.0 * weight
+        elif pct >= 50:
+            score += 0.25 * weight
+        elif pct < 40:
+            score -= 1.5 * weight
+        else:
+            score -= 0.5 * weight
+    return score, available, strong
+
+
+def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd.Series | None = None) -> dict:
     if history.empty:
-        return {"signal": "❌ RISIKO", "reason": "Tidak ada histori harga."}
+        return {"signal": "❌ BERISIKO", "reason": "Tidak ada histori harga."}
 
     h = history.sort_values("trade_date").iloc[-1]
     close = float(h.get("close_price", np.nan))
     sma20 = float(h.get("sma20", np.nan))
     sma50 = float(h.get("sma50", np.nan))
+    sma200 = float(h.get("sma200", np.nan))
     rsi = float(h.get("rsi14", np.nan))
     vol_ratio = float(h.get("volume_ratio", np.nan))
     atr = float(h.get("atr14", np.nan))
-    pct = float(accumulation.get("net_buy_pct_3d", np.nan))
+    pct3 = float(accumulation.get("net_buy_pct_3d", np.nan))
 
-    score = 0
-    reasons = []
-    if np.isfinite(pct):
-        if pct >= 75:
-            score += 2; reasons.append("akumulasi 3 hari kuat")
-        elif pct > 65:
-            score += 1; reasons.append("akumulasi 3 hari lolos filter")
-        else:
-            score -= 2
+    score = 0.0
+    reasons: list[str] = []
+    multi_score, horizons_available, strong_horizons = _horizon_strength(accumulation)
+    score += multi_score
+    if horizons_available:
+        reasons.append(f"multi-horizon aktif {horizons_available}/{len(HORIZONS)} horizon")
+    if strong_horizons >= 3:
+        reasons.append(f"akumulasi kuat di {strong_horizons} horizon")
+
     if np.isfinite(close) and np.isfinite(sma20):
-        if close > sma20: score += 1; reasons.append("harga di atas SMA20")
-        else: score -= 1; reasons.append("harga di bawah SMA20")
+        if close > sma20:
+            score += 1.0; reasons.append("harga di atas SMA20")
+        else:
+            score -= 1.0; reasons.append("harga di bawah SMA20")
     if np.isfinite(close) and np.isfinite(sma50):
-        if close > sma50: score += 1; reasons.append("harga di atas SMA50")
-        else: score -= 1; reasons.append("harga di bawah SMA50")
+        if close > sma50:
+            score += 1.0; reasons.append("harga di atas SMA50")
+        else:
+            score -= 1.0; reasons.append("harga di bawah SMA50")
+    if np.isfinite(close) and np.isfinite(sma200):
+        if close > sma200:
+            score += 1.0; reasons.append("harga di atas SMA200")
+        else:
+            score -= 1.0; reasons.append("harga di bawah SMA200")
     if np.isfinite(rsi):
-        if 50 <= rsi <= 70: score += 1; reasons.append("RSI mendukung momentum")
-        elif rsi > 75: score -= 1; reasons.append("RSI terlalu panas")
-        elif rsi < 35: reasons.append("RSI rendah; perlu konfirmasi")
+        if 50 <= rsi <= 70:
+            score += 1.0; reasons.append("RSI mendukung momentum")
+        elif rsi > 75:
+            score -= 1.0; reasons.append("RSI terlalu panas")
+        elif rsi < 35:
+            reasons.append("RSI rendah; perlu konfirmasi reversal")
     if np.isfinite(vol_ratio) and vol_ratio >= 1.5:
-        score += 1; reasons.append("volume meningkat")
+        score += 1.0; reasons.append("volume meningkat")
 
-    if score >= 4:
+    ob_score = 0.0
+    ob_signal = "⚪ TIDAK ADA ORDERBOOK"
+    if orderbook is not None and not orderbook.empty:
+        ob_score = float(orderbook.get("orderbook_score", 0) or 0)
+        score += ob_score
+        ob_signal = str(orderbook.get("orderbook_signal", ob_signal))
+        if ob_score > 0:
+            reasons.append(f"orderbook mendukung ({ob_signal})")
+        elif ob_score < 0:
+            reasons.append(f"orderbook menekan ({ob_signal})")
+
+    if score >= 8:
         signal = "✅ LANJUT RALLY"
-    elif score >= 1:
+    elif score >= 3:
         signal = "⚠️ KONSOLIDASI / KONFIRMASI"
     else:
         signal = "❌ BERISIKO"
 
-    if np.isfinite(pct) and pct >= 75 and np.isfinite(rsi) and rsi > 75:
+    long_pct = [accumulation.get(f"net_buy_pct_{d}d", np.nan) for d in (60, 100, 200)]
+    recent_pct = [accumulation.get(f"net_buy_pct_{d}d", np.nan) for d in (3, 5, 10, 20)]
+    long_mean = np.nanmean(long_pct) if any(np.isfinite(x) for x in long_pct) else np.nan
+    recent_mean = np.nanmean(recent_pct) if any(np.isfinite(x) for x in recent_pct) else np.nan
+    if np.isfinite(pct3) and pct3 >= 75 and np.isfinite(rsi) and rsi > 75:
         quality = "⚠️ Akumulasi kuat tetapi harga sudah panas"
-    elif np.isfinite(pct) and pct > 65 and score >= 3:
-        quality = "✅ Akumulasi relatif sehat"
+    elif np.isfinite(recent_mean) and np.isfinite(long_mean) and recent_mean >= 65 and long_mean >= 60:
+        quality = "✅ Akumulasi sehat lintas horizon"
+    elif np.isfinite(pct3) and pct3 > 65:
+        quality = "🟡 Akumulasi baru; cek konfirmasi horizon panjang"
     else:
         quality = "⚠️ Perlu konfirmasi harga/volume"
 
@@ -141,42 +215,55 @@ def classify_stock(history: pd.DataFrame, accumulation: pd.Series) -> dict:
     return {
         "signal": signal,
         "quality": quality,
-        "score": score,
+        "score": round(score, 2),
+        "multi_horizon_score": round(multi_score, 2),
+        "horizons_available": horizons_available,
         "reason": "; ".join(reasons),
         "rsi14": rsi,
         "sma20": sma20,
         "sma50": sma50,
+        "sma200": sma200,
         "volume_ratio": vol_ratio,
         "atr14": atr,
+        "orderbook_score": ob_score,
+        "orderbook_signal": ob_signal,
         "target_low": target_low,
         "target_high": target_high,
         "stop_loss": stop,
     }
 
 
-def screen(df: pd.DataFrame, threshold: float = 65.0) -> pd.DataFrame:
+def screen(df: pd.DataFrame, threshold: float = 65.0, orderbook: pd.DataFrame | None = None) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     data = add_indicators(df)
-    acc = three_day_accumulation(data)
+    acc = accumulation_horizons(data)
     latest = data.sort_values("trade_date").groupby("stock_code", as_index=False).tail(1)
+    ob_map = {}
+    if orderbook is not None and not orderbook.empty:
+        ob_map = orderbook.set_index("stock_code").to_dict(orient="index")
 
-    rows = []
+    rows: list[dict] = []
     for _, a in acc.iterrows():
         code = a["stock_code"]
         hist = data[data["stock_code"] == code]
-        result = classify_stock(hist, a)
+        ob = pd.Series(ob_map.get(code, {}))
+        result = classify_stock(hist, a, ob)
         row = a.to_dict()
         latest_row = latest[latest["stock_code"] == code]
         if not latest_row.empty:
             lr = latest_row.iloc[0]
-            row.update({"company_name": lr.get("company_name"), "close_price": lr.get("close_price"), "volume": lr.get("volume")})
+            row.update({
+                "company_name": lr.get("company_name"),
+                "close_price": lr.get("close_price"),
+                "volume": lr.get("volume"),
+            })
         row.update(result)
         rows.append(row)
 
     result = pd.DataFrame(rows)
     if result.empty:
         return result
-    result = result[result["days_available"] >= 3]
+    result = result[result["days_available_3d"] >= 3].copy()
     result = result[result["net_buy_pct_3d"] > threshold].copy()
-    return result.sort_values(["net_buy_pct_3d", "score"], ascending=[False, False]).reset_index(drop=True)
+    return result.sort_values(["score", "net_buy_pct_3d"], ascending=[False, False]).reset_index(drop=True)
