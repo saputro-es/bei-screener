@@ -42,6 +42,7 @@ for side, labels in (("bid", ("Bid",)), ("ask", ("Ask", "Offer"))):
 
 OPTIONAL_COLUMNS = ["company_name", "open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy"]
 DAILY_ORDERBOOK_COLUMNS = [f"{side}_{kind}_{level}" for level in range(1, 6) for side in ("bid", "ask") for kind in ("price", "volume")]
+ORDERBOOK_COLUMNS = ["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS
 NUMERIC_DAILY_COLUMNS = [c for c in OPTIONAL_COLUMNS if c != "company_name"] + DAILY_ORDERBOOK_COLUMNS
 
 
