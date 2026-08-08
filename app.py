@@ -35,6 +35,39 @@ def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
     return available.loc[mask].copy()
 
 
+def _safe_orderbook_table(orderbook: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee a stable display schema even when Streamlit serves mixed/stale module state."""
+    if orderbook is None or orderbook.empty:
+        return pd.DataFrame()
+    table = orderbook.copy()
+    required_columns = {
+        "stock_code": "",
+        "orderbook_status": "⚪ SCHEMA TIDAK TERSEDIA",
+        "orderbook_signal": "⚪ DATA TIDAK CUKUP",
+        "book_pressure_pct": float("nan"),
+        "orderbook_imbalance_pct": float("nan"),
+        "best_bid": float("nan"),
+        "best_ask": float("nan"),
+        "spread": float("nan"),
+        "spread_pct": float("nan"),
+    }
+    for column, default in required_columns.items():
+        if column not in table.columns:
+            table[column] = default
+    return table
+
+
+def _orderbook_sort_key(table: pd.DataFrame) -> pd.DataFrame:
+    """Sort without ever raising KeyError if a deployment has an older schema."""
+    table = _safe_orderbook_table(table)
+    if table.empty:
+        return table
+    sort_cols = [c for c in ["orderbook_status", "book_pressure_pct"] if c in table.columns]
+    if not sort_cols:
+        return table
+    return table.sort_values(sort_cols, ascending=[True] * len(sort_cols), na_position="last")
+
+
 st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
 st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + five-level Bid/Offer snapshot")
 
@@ -138,7 +171,7 @@ if submitted:
 st.divider()
 data = load_data()
 orderbook_raw = _embedded_orderbook(data)
-orderbook = summarize_orderbook(orderbook_raw)
+orderbook = _safe_orderbook_table(summarize_orderbook(orderbook_raw))
 
 if data.empty:
     st.info("Belum ada data. Upload histori BEI terlebih dahulu.")
@@ -232,4 +265,5 @@ st.subheader("📖 Bid/Offer terbaru dari file BEI")
 if orderbook.empty:
     st.info("File BEI belum menyediakan level Bid/Offer yang dapat dibaca.")
 else:
-    st.dataframe(orderbook.sort_values(["orderbook_status", "book_pressure_pct"], ascending=[True, False]), use_container_width=True, hide_index=True)
+    safe_orderbook = _orderbook_sort_key(orderbook)
+    st.dataframe(safe_orderbook, use_container_width=True, hide_index=True)
