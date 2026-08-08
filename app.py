@@ -31,8 +31,8 @@ def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
     available = available.rename(columns={"trade_date": "snapshot_date"})
     available["snapshot_time"] = "00:00:00"
     available = available[["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS]
-    available = available[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1).to_frame("valid").join(available).loc[lambda x: x["valid"]].drop(columns="valid")
-    return available
+    mask = available[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1)
+    return available.loc[mask].copy()
 
 
 st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
@@ -45,7 +45,7 @@ with st.sidebar:
     st.write(f"📦 Database: {info['total_rows']:,} baris")
     st.write(f"🏷️ Saham: {info['total_stocks']:,}")
     st.write(f"📅 Hari: {info['total_days']:,}")
-    st.write(f"📖 Snapshot Bid/Offer: {info['orderbook_rows']:,} baris")
+    st.write(f"📖 Baris dengan field Bid/Offer: {info['orderbook_rows']:,}")
 
 st.subheader("📂 Upload data BEI")
 st.caption(
@@ -216,8 +216,8 @@ else:
             st.write(
                 f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | "
                 f"Status: {row.get('orderbook_status', '-')} | "
-                f"Pressure {row.get('book_pressure_pct', float('nan')):.2f}% | "
-                f"Imbalance {row.get('orderbook_imbalance_pct', float('nan')):.2f}%"
+                f"Pressure {_fmt(row.get('book_pressure_pct'), 2)}% | "
+                f"Imbalance {_fmt(row.get('orderbook_imbalance_pct'), 2)}%"
             )
             st.write(f"**Alasan:** {row.get('reason', '-')}")
             st.write(f"**Target 1 minggu (indikatif):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
