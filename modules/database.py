@@ -80,8 +80,9 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     data = df.copy()
     data.columns = [str(c).strip() for c in data.columns]
-    for canonical, aliases in COLUMN_ALIASES.items():
-        source = _find_column(data.columns, aliases)
+    aliases = {**COLUMN_ALIASES, **{k: v for k, v in ORDERBOOK_ALIASES.items() if k in DAILY_ORDERBOOK_COLUMNS}}
+    for canonical, names in aliases.items():
+        source = _find_column(data.columns, names)
         if source is not None and canonical not in data.columns:
             data[canonical] = data[source]
     missing = {"trade_date", "stock_code"} - set(data.columns)
