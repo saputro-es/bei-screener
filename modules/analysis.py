@@ -117,6 +117,16 @@ def _horizon_strength(row: pd.Series) -> tuple[float, int, int]:
     return score, available, strong
 
 
+def _technical_readiness(history: pd.DataFrame) -> tuple[int, str]:
+    """Report how much price history exists without fabricating indicators."""
+    available = int(history["trade_date"].nunique()) if "trade_date" in history else 0
+    requirements = {"RSI14": 14, "SMA20": 20, "SMA50": 50, "SMA200": 200, "Vol20": 20, "ATR14": 14}
+    missing = [f"{name} {min(available, need)}/{need}" for name, need in requirements.items() if available < need]
+    if not missing:
+        return available, "✅ TEKNIKAL LENGKAP"
+    return available, "⏳ HISTORI BELUM CUKUP — " + ", ".join(missing)
+
+
 def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd.Series | None = None) -> dict:
     if history.empty:
         return {"signal": "❌ BERISIKO", "reason": "Tidak ada histori harga."}
@@ -127,7 +137,8 @@ def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd
     pct3 = float(accumulation.get("net_buy_pct_3d", np.nan))
 
     score, horizons_available, strong_horizons = _horizon_strength(accumulation)
-    reasons: list[str] = []
+    history_days, technical_status = _technical_readiness(history)
+    reasons: list[str] = [technical_status]
     if horizons_available:
         reasons.append(f"multi-horizon aktif {horizons_available}/{len(HORIZONS)} horizon")
     if strong_horizons >= 3:
@@ -155,11 +166,17 @@ def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd
 
     ob_score = 0.0
     ob_signal = "⚪ TIDAK ADA ORDERBOOK"
+    ob_status = "TIDAK ADA DATA ORDERBOOK"
     ob_metrics = {k: np.nan for k in ("book_pressure_pct", "orderbook_imbalance_pct", "spread_pct", "best_bid", "best_ask", "bid_depth_5", "ask_depth_5")}
     if orderbook is not None and not orderbook.empty:
-        ob_score = float(orderbook.get("orderbook_score", 0) or 0)
+        raw_score = orderbook.get("orderbook_score", 0)
+        try:
+            ob_score = float(raw_score) if pd.notna(raw_score) else 0.0
+        except (TypeError, ValueError):
+            ob_score = 0.0
         score += ob_score
         ob_signal = str(orderbook.get("orderbook_signal", ob_signal))
+        ob_status = str(orderbook.get("orderbook_status", ob_status))
         for key in ob_metrics:
             value = orderbook.get(key, np.nan)
             try:
@@ -170,6 +187,8 @@ def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd
             reasons.append(f"orderbook mendukung ({ob_signal})")
         elif ob_score < 0:
             reasons.append(f"orderbook menekan ({ob_signal})")
+        else:
+            reasons.append(f"orderbook tidak memberi skor ({ob_status})")
 
     if score >= 8:
         signal = "✅ LANJUT RALLY"
@@ -198,9 +217,10 @@ def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd
 
     return {
         "signal": signal, "quality": quality, "score": round(score, 2), "multi_horizon_score": round(score - ob_score, 2),
-        "horizons_available": horizons_available, "reason": "; ".join(reasons), "rsi14": rsi,
+        "horizons_available": horizons_available, "history_days": history_days, "technical_status": technical_status,
+        "reason": "; ".join(reasons), "rsi14": rsi,
         "sma20": sma20, "sma50": sma50, "sma200": sma200, "volume_ratio": vol_ratio, "atr14": atr,
-        "orderbook_score": ob_score, "orderbook_signal": ob_signal, **ob_metrics,
+        "orderbook_score": ob_score, "orderbook_signal": ob_signal, "orderbook_status": ob_status, **ob_metrics,
         "target_low": target_low, "target_high": target_high, "stop_loss": stop,
     }
 
