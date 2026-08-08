@@ -8,24 +8,34 @@ LEVELS = range(1, 6)
 
 
 def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert raw orderbook levels into one latest-snapshot signal per stock."""
+    """Convert raw orderbook levels into one latest valid snapshot per stock."""
     if df is None or df.empty:
         return pd.DataFrame(columns=["stock_code"])
 
     data = df.copy()
+    if "snapshot_date" not in data:
+        data["snapshot_date"] = pd.Timestamp.today().normalize()
+    if "snapshot_time" not in data:
+        data["snapshot_time"] = "00:00:00"
     data["snapshot_date"] = pd.to_datetime(data["snapshot_date"], errors="coerce")
     data["snapshot_time"] = data["snapshot_time"].astype(str)
     data = data.dropna(subset=["stock_code", "snapshot_date"])
-    data = data.sort_values(["stock_code", "snapshot_date", "snapshot_time"])
-    latest = data.groupby("stock_code", as_index=False).tail(1).copy()
 
     for side in ("bid", "ask"):
         for kind in ("price", "volume"):
             for level in LEVELS:
                 col = f"{side}_{kind}_{level}"
-                if col not in latest:
-                    latest[col] = np.nan
-                latest[col] = pd.to_numeric(latest[col], errors="coerce")
+                if col not in data:
+                    data[col] = np.nan
+                data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    value_columns = [f"{side}_{kind}_{level}" for level in LEVELS for side in ("bid", "ask") for kind in ("price", "volume")]
+    data = data[data[value_columns].notna().any(axis=1)].copy()
+    if data.empty:
+        return pd.DataFrame(columns=["stock_code"])
+
+    data = data.sort_values(["stock_code", "snapshot_date", "snapshot_time"])
+    latest = data.groupby("stock_code", as_index=False).tail(1).copy()
 
     bid_depth = latest[[f"bid_volume_{n}" for n in LEVELS]].sum(axis=1, min_count=1)
     ask_depth = latest[[f"ask_volume_{n}" for n in LEVELS]].sum(axis=1, min_count=1)
