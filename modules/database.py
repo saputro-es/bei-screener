@@ -45,6 +45,17 @@ def _find_column(columns: Iterable[str], aliases: list[str]) -> str | None:
     return None
 
 
+def _db_value(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize common BEI column names while retaining original columns."""
     if df is None or df.empty:
@@ -69,7 +80,6 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     data["stock_code"] = data["stock_code"].astype(str).str.strip().str.upper()
     data.loc[data["stock_code"].isin(["", "NAN", "NONE"]), "stock_code"] = pd.NA
-    data["company_name"] = data["company_name"].where(data["company_name"].notna(), None)
     data["company_name"] = data["company_name"].astype("string")
 
     parsed = pd.to_datetime(data["trade_date"], errors="coerce", dayfirst=True)
@@ -129,6 +139,14 @@ def save_dataframe(df: pd.DataFrame) -> int:
     with sqlite3.connect(DATABASE_FILE) as conn:
         for _, row in data.iterrows():
             raw_data = json.dumps(row.to_dict(), default=str, ensure_ascii=False)
+            values = (
+                _db_value(row.get("trade_date")), _db_value(row.get("stock_code")),
+                _db_value(row.get("company_name")), _db_value(row.get("open_price")),
+                _db_value(row.get("high_price")), _db_value(row.get("low_price")),
+                _db_value(row.get("close_price")), _db_value(row.get("volume")),
+                _db_value(row.get("value")), _db_value(row.get("frequency")),
+                _db_value(row.get("foreign_sell")), _db_value(row.get("foreign_buy")), raw_data,
+            )
             conn.execute(
                 """
                 INSERT INTO stock_daily (
@@ -149,13 +167,7 @@ def save_dataframe(df: pd.DataFrame) -> int:
                     foreign_buy=excluded.foreign_buy,
                     raw_data=excluded.raw_data
                 """,
-                (
-                    row.get("trade_date"), row.get("stock_code"), row.get("company_name"),
-                    row.get("open_price"), row.get("high_price"), row.get("low_price"),
-                    row.get("close_price"), row.get("volume"), row.get("value"),
-                    row.get("frequency"), row.get("foreign_sell"), row.get("foreign_buy"),
-                    raw_data,
-                ),
+                values,
             )
             saved += 1
         conn.commit()
