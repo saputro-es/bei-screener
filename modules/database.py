@@ -37,19 +37,11 @@ ORDERBOOK_ALIASES = {
 }
 for side, labels in (("bid", ("Bid",)), ("ask", ("Ask", "Offer"))):
     for level in range(2, 6):
-        ORDERBOOK_ALIASES[f"{side}_price_{level}"] = [
-            f"{label} Price {level}" for label in labels
-        ] + [f"{label}{level} Price" for label in labels] + [f"{label} {level}" for label in labels] + [f"Harga {labels[-1]} {level}"]
-        ORDERBOOK_ALIASES[f"{side}_volume_{level}"] = [
-            f"{label} Volume {level}" for label in labels
-        ] + [f"{label}{level} Volume" for label in labels] + [f"{label} {level} Volume" for label in labels] + [f"Volume {labels[-1]} {level}"]
+        ORDERBOOK_ALIASES[f"{side}_price_{level}"] = [f"{label} Price {level}" for label in labels] + [f"{label}{level} Price" for label in labels] + [f"{label} {level}" for label in labels] + [f"Harga {labels[-1]} {level}"]
+        ORDERBOOK_ALIASES[f"{side}_volume_{level}"] = [f"{label} Volume {level}" for label in labels] + [f"{label}{level} Volume" for label in labels] + [f"{label} {level} Volume" for label in labels] + [f"Volume {labels[-1]} {level}"]
 
-OPTIONAL_COLUMNS = [
-    "company_name", "open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency",
-    "foreign_sell", "foreign_buy",
-]
+OPTIONAL_COLUMNS = ["company_name", "open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy"]
 DAILY_ORDERBOOK_COLUMNS = [f"{side}_{kind}_{level}" for level in range(1, 6) for side in ("bid", "ask") for kind in ("price", "volume")]
-ORDERBOOK_COLUMNS = ["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS
 NUMERIC_DAILY_COLUMNS = [c for c in OPTIONAL_COLUMNS if c != "company_name"] + DAILY_ORDERBOOK_COLUMNS
 
 
@@ -132,12 +124,7 @@ def normalize_orderbook_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(stock_daily)").fetchall()}
-    additions = {
-        "trade_date": "TEXT", "stock_code": "TEXT", "company_name": "TEXT", "open_price": "REAL",
-        "high_price": "REAL", "low_price": "REAL", "close_price": "REAL", "volume": "REAL", "value": "REAL",
-        "frequency": "REAL", "foreign_sell": "REAL", "foreign_buy": "REAL", "raw_data": "TEXT",
-        **{column: "REAL" for column in DAILY_ORDERBOOK_COLUMNS},
-    }
+    additions = {"trade_date": "TEXT", "stock_code": "TEXT", "company_name": "TEXT", "open_price": "REAL", "high_price": "REAL", "low_price": "REAL", "close_price": "REAL", "volume": "REAL", "value": "REAL", "frequency": "REAL", "foreign_sell": "REAL", "foreign_buy": "REAL", "raw_data": "TEXT", **{column: "REAL" for column in DAILY_ORDERBOOK_COLUMNS}}
     for column, sql_type in additions.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE stock_daily ADD COLUMN {column} {sql_type}")
@@ -151,25 +138,17 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 def _migrate_orderbook_schema(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(orderbook_snapshot)").fetchall()}
-    additions = {column: "REAL" for column in DAILY_ORDERBOOK_COLUMNS}
-    for column, sql_type in additions.items():
+    for column in DAILY_ORDERBOOK_COLUMNS:
         if column not in existing:
-            conn.execute(f"ALTER TABLE orderbook_snapshot ADD COLUMN {column} {sql_type}")
+            conn.execute(f"ALTER TABLE orderbook_snapshot ADD COLUMN {column} REAL")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_orderbook_snapshot_key ON orderbook_snapshot(snapshot_date, snapshot_time, stock_code)")
 
 
 def init_database() -> None:
     DATABASE_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DATABASE_FILE) as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, stock_code TEXT NOT NULL,
-            company_name TEXT, open_price REAL, high_price REAL, low_price REAL, close_price REAL,
-            volume REAL, value REAL, frequency REAL, foreign_sell REAL, foreign_buy REAL,
-            raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(trade_date, stock_code))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS orderbook_snapshot (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_date TEXT NOT NULL, snapshot_time TEXT NOT NULL DEFAULT '00:00:00',
-            stock_code TEXT NOT NULL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(snapshot_date, snapshot_time, stock_code))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, company_name TEXT, open_price REAL, high_price REAL, low_price REAL, close_price REAL, volume REAL, value REAL, frequency REAL, foreign_sell REAL, foreign_buy REAL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(trade_date, stock_code))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS orderbook_snapshot (id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_date TEXT NOT NULL, snapshot_time TEXT NOT NULL DEFAULT '00:00:00', stock_code TEXT NOT NULL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(snapshot_date, snapshot_time, stock_code))""")
         _migrate_schema(conn)
         _migrate_orderbook_schema(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)")
@@ -190,10 +169,7 @@ def save_orderbook(df: pd.DataFrame) -> int:
             raw_data = json.dumps(row.to_dict(), default=str, ensure_ascii=False)
             values = tuple(_db_value(row.get(c)) for c in ORDERBOOK_COLUMNS) + (raw_data,)
             assignments = ", ".join(f"{c}=excluded.{c}" for c in value_columns) + ", raw_data=excluded.raw_data"
-            conn.execute(
-                f"INSERT INTO orderbook_snapshot ({', '.join(ORDERBOOK_COLUMNS)}, raw_data) VALUES ({', '.join('?' for _ in values)}) ON CONFLICT(snapshot_date, snapshot_time, stock_code) DO UPDATE SET {assignments}",
-                values,
-            )
+            conn.execute(f"INSERT INTO orderbook_snapshot ({', '.join(ORDERBOOK_COLUMNS)}, raw_data) VALUES ({', '.join('?' for _ in values)}) ON CONFLICT(snapshot_date, snapshot_time, stock_code) DO UPDATE SET {assignments}", values)
             saved += 1
         conn.commit()
     return saved
@@ -213,15 +189,10 @@ def save_dataframe(df: pd.DataFrame) -> int:
             values = tuple(_db_value(row.get(c)) for c in daily_columns) + (raw_data,)
             update_columns = daily_columns[2:] + ["raw_data"]
             assignments = ", ".join(f"{c}=excluded.{c}" for c in update_columns)
-            conn.execute(
-                f"INSERT INTO stock_daily ({', '.join(daily_columns)}, raw_data) VALUES ({', '.join('?' for _ in values)}) ON CONFLICT(trade_date, stock_code) DO UPDATE SET {assignments}",
-                values,
-            )
+            conn.execute(f"INSERT INTO stock_daily ({', '.join(daily_columns)}, raw_data) VALUES ({', '.join('?' for _ in values)}) ON CONFLICT(trade_date, stock_code) DO UPDATE SET {assignments}", values)
             saved += 1
         conn.commit()
-    # The BEI daily file is the canonical upload; if it contains Bid/Offer fields, persist them as snapshots too.
-    embedded = data[["trade_date", "stock_code"] + DAILY_ORDERBOOK_COLUMNS].copy()
-    embedded = embedded.rename(columns={"trade_date": "snapshot_date"})
+    embedded = data[["trade_date", "stock_code"] + DAILY_ORDERBOOK_COLUMNS].copy().rename(columns={"trade_date": "snapshot_date"})
     embedded["snapshot_time"] = "00:00:00"
     if embedded[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=None):
         save_orderbook(embedded[["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS])
@@ -269,7 +240,7 @@ def database_info() -> dict[str, int]:
         total_rows = conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0]
         total_stocks = conn.execute("SELECT COUNT(DISTINCT stock_code) FROM stock_daily").fetchone()[0]
         total_days = conn.execute("SELECT COUNT(DISTINCT trade_date) FROM stock_daily").fetchone()[0]
-        orderbook_rows = conn.execute("SELECT COUNT(*) FROM stock_daily WHERE bid_price_1_1 IS NOT NULL OR ask_price_1_1 IS NOT NULL OR bid_price_1 IS NOT NULL OR ask_price_1 IS NOT NULL").fetchone()[0]
+        orderbook_rows = conn.execute("SELECT COUNT(*) FROM stock_daily WHERE bid_price_1 IS NOT NULL OR ask_price_1 IS NOT NULL").fetchone()[0]
     return {"total_rows": total_rows, "total_stocks": total_stocks, "total_days": total_days, "orderbook_rows": orderbook_rows}
 
 
