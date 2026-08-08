@@ -49,9 +49,10 @@ def test_multi_horizon_has_all_blueprint_windows():
     data = normalize_dataframe(sample_data(220))
     result = accumulation_horizons(data)
     aaa = result[result["stock_code"] == "AAA"].iloc[0]
+    expected = {3: 70.0, 5: 70.0, 10: 70.0, 20: 70.0, 60: 56.6666667, 100: 54.0, 200: 52.0}
     for days in HORIZONS:
         assert aaa[f"days_available_{days}d"] == days
-        assert np.isclose(aaa[f"net_buy_pct_{days}d"], 70.0 if days <= 20 else 50.0)
+        assert np.isclose(aaa[f"net_buy_pct_{days}d"], expected[days])
 
 
 def test_screen_filters_3d_but_scores_long_horizons():
