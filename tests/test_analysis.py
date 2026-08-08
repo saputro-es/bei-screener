@@ -93,6 +93,13 @@ def test_orderbook_pressure_is_computed():
     assert row["best_ask"] == 1005
 
 
+def test_empty_orderbook_rows_do_not_look_like_valid_snapshots():
+    raw = pd.DataFrame([{"Tanggal": "2026-08-07", "Waktu": "09:30:00", "Kode Saham": "AAA"}])
+    normalized = db.normalize_orderbook_dataframe(raw)
+    result = summarize_orderbook(normalized)
+    assert result.empty
+
+
 def test_embedded_dataframe_preserves_orderbook_levels_1_to_5():
     normalized = normalize_dataframe(with_orderbook(sample_data(3)))
     assert normalized["bid_price_1"].notna().all()
