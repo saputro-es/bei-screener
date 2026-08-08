@@ -9,6 +9,7 @@ Stored in `stock_daily`:
 - OHLC
 - volume/value/frequency
 - Foreign Buy / Foreign Sell
+- embedded BEI Bid/Offer fields when supplied by the daily file
 
 ### Intraday orderbook layer
 Stored in `orderbook_snapshot`:
@@ -16,7 +17,7 @@ Stored in `orderbook_snapshot`:
 - ticker
 - Bid/Offer price and volume, levels 1–5
 
-The two layers are intentionally separate because one ticker can have many orderbook snapshots during one trading day while daily OHLC/flow has one row per trading date.
+The **logical layers remain separate** even when the uploaded BEI daily file already contains Bid/Offer. The daily BEI file is the canonical ingestion source, so the application must not require a duplicate orderbook upload. When embedded Bid/Offer exists, it is normalized into the orderbook snapshot store automatically. A future realtime/API source can write multiple snapshots per trading day to the same table without changing the screener engine.
 
 ## 2. Accumulation horizons
 
@@ -37,6 +38,8 @@ The 3D threshold remains the primary candidate gate (>65% by default). All longe
 - RSI14
 - Volume / Volume MA20 ratio
 - ATR14
+
+Technical windows are data-sufficient: an SMA/ATR is not treated as valid before its full window exists.
 
 ## 4. Orderbook confirmation
 
