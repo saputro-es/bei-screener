@@ -49,7 +49,6 @@ def test_bulk_upload_upserts_and_preserves_existing_non_null(monkeypatch, tmp_pa
             "close_price": [105, 97],
             "foreign_buy": [800, 500],
             "foreign_sell": [200, 500],
-            # Missing orderbook must not erase the existing 7/31 snapshot.
         }
     )
     result2 = upload.save_upload_batch(
@@ -76,7 +75,7 @@ def test_bulk_upload_upserts_and_preserves_existing_non_null(monkeypatch, tmp_pa
 
 def test_existing_hashes(monkeypatch, tmp_path):
     _use_temp_db(monkeypatch, tmp_path)
-    database.init_database()
+    upload.existing_hashes([])
     with sqlite3.connect(upload.DATABASE_FILE) as conn:
         conn.execute(
             "INSERT INTO upload_ledger (sha256, filename, size_bytes, rows_read, rows_saved) "
