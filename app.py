@@ -67,23 +67,23 @@ if files:
         st.error(f"❌ Terlalu banyak file: {len(files)}. Maksimal {MAX_FILES_PER_BATCH} file per batch.")
         st.stop()
 
-    file_hashes = {file.name: sha256_bytes(file.getvalue()) for file in files}
-    already_uploaded = existing_hashes(file_hashes.values())
-    new_files = [file for file in files if file_hashes[file.name] not in already_uploaded]
+    file_entries = [(file, sha256_bytes(file.getvalue())) for file in files]
+    already_uploaded = existing_hashes(sha for _, sha in file_entries)
+    new_entries = [(file, file_sha) for file, file_sha in file_entries if file_sha not in already_uploaded]
 
     if already_uploaded:
         st.info(f"♻️ {len(already_uploaded)} file sudah ada di database dan tidak akan diproses ulang.")
 
-    if not new_files:
+    if not new_entries:
         st.success("Semua file yang dipilih sudah pernah diimpor. Tidak ada pekerjaan database yang diulang.")
         st.session_state.upload_generation += 1
         st.rerun()
 
     all_frames: list[pd.DataFrame] = []
     file_records: list[dict] = []
-    progress = st.progress(0, text=f"Membaca 0/{len(new_files)} file...")
+    progress = st.progress(0, text=f"Membaca 0/{len(new_entries)} file...")
 
-    for index, file in enumerate(new_files, start=1):
+    for index, (file, file_sha) in enumerate(new_entries, start=1):
         try:
             raw = pd.read_excel(BytesIO(file.getvalue()))
             normalized = normalize_dataframe(raw)
@@ -93,7 +93,7 @@ if files:
             ob_count = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
             level_count = int(normalized[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1).sum())
             file_records.append({
-                "sha256": file_hashes[file.name],
+                "sha256": file_sha,
                 "filename": file.name,
                 "size_bytes": len(file.getvalue()),
                 "rows_read": len(normalized),
@@ -103,7 +103,7 @@ if files:
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
         finally:
-            progress.progress(index / len(new_files), text=f"Membaca {index}/{len(new_files)} file...")
+            progress.progress(index / len(new_entries), text=f"Membaca {index}/{len(new_entries)} file...")
 
     if all_frames:
         try:
