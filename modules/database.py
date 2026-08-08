@@ -31,6 +31,13 @@ OPTIONAL_COLUMNS = [
     "volume", "value", "frequency", "foreign_sell", "foreign_buy",
 ]
 
+COLUMN_TYPES = {
+    "trade_date": "TEXT", "stock_code": "TEXT", "company_name": "TEXT",
+    "open_price": "REAL", "high_price": "REAL", "low_price": "REAL", "close_price": "REAL",
+    "volume": "REAL", "value": "REAL", "frequency": "REAL",
+    "foreign_sell": "REAL", "foreign_buy": "REAL", "raw_data": "TEXT",
+}
+
 
 def _find_column(columns: Iterable[str], aliases: list[str]) -> str | None:
     normalized = {str(c).strip().lower(): c for c in columns}
@@ -59,7 +66,6 @@ def _db_value(value):
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-
     data = df.copy()
     data.columns = [str(c).strip() for c in data.columns]
     for canonical, aliases in COLUMN_ALIASES.items():
@@ -80,13 +86,24 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     data.loc[data["stock_code"].isin(["", "NAN", "NONE"]), "stock_code"] = pd.NA
     data["company_name"] = data["company_name"].astype("string")
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
-
-    for col in [
-        "open_price", "high_price", "low_price", "close_price", "volume",
-        "value", "frequency", "foreign_sell", "foreign_buy",
-    ]:
+    for col in ["open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy"]:
         data[col] = pd.to_numeric(data[col], errors="coerce")
     return data
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add columns needed by the current app to databases created by older versions."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(stock_daily)").fetchall()}
+    for column, sql_type in COLUMN_TYPES.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE stock_daily ADD COLUMN {column} {sql_type}")
+
+    # Migrate common legacy names when present.
+    if "close_price" in COLUMN_TYPES and "price" in existing:
+        conn.execute("UPDATE stock_daily SET close_price = COALESCE(close_price, price)")
+    if "company_name" in COLUMN_TYPES and "stock_name" in existing:
+        conn.execute("UPDATE stock_daily SET company_name = COALESCE(company_name, stock_name)")
+    conn.commit()
 
 
 def init_database() -> None:
@@ -114,6 +131,7 @@ def init_database() -> None:
             )
             """
         )
+        _migrate_schema(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_date ON stock_daily(trade_date)")
         conn.commit()
