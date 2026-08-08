@@ -1,8 +1,7 @@
 streamlit
 pandas
 numpy
-yfinance
-ta
 openpyxl
-requests
+xlrd
 plotly
+pytest

@@ -1,19 +1,29 @@
 # Python
 __pycache__/
 *.py[codz]
+*.so
 *.egg-info/
 .venv/
 venv/
 .env
 
-# Streamlit
-.streamlit/secrets.toml
+# Tests / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
 
-# Local SQLite data
-database/*.db
-database/*.db-journal
-
-# Local IDE/system files
+# IDE / OS
 .vscode/
 .idea/
 .DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local application data
+database/*.db
+database/*.sqlite
+database/*.sqlite3
+database/*.xlsx
+database/*.xls
