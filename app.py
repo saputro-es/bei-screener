@@ -29,7 +29,9 @@ def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
     available = data[["trade_date", "stock_code"] + DAILY_ORDERBOOK_COLUMNS].copy()
     available = available.rename(columns={"trade_date": "snapshot_date"})
     available["snapshot_time"] = "00:00:00"
-    return available[["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS]
+    available = available[["snapshot_date", "snapshot_time", "stock_code"] + DAILY_ORDERBOOK_COLUMNS]
+    available = available[available[DAILY_ORDERBOOK_COLUMNS].notna().any(axis=1)]
+    return available
 
 
 st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
