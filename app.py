@@ -8,6 +8,7 @@ import streamlit as st
 from modules.analysis import HORIZONS, screen
 from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, normalize_dataframe
 from modules.orderbook import summarize_orderbook
+from modules.persistence import backup_database, config as persistence_config, restore_if_needed, status as persistence_status
 from modules.upload import MAX_FILES_PER_BATCH, existing_hashes, save_upload_batch, sha256_bytes
 
 st.set_page_config(page_title="BEI Screener V4", page_icon="📈", layout="wide")
@@ -71,7 +72,16 @@ def _orderbook_sort_key(table: pd.DataFrame) -> pd.DataFrame:
 st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
 st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + five-level Bid/Offer snapshot")
 
+# Community Cloud does not guarantee persistence of files created at runtime.
+# Restore the last known-good SQLite snapshot before the first database read.
+try:
+    restore_result = restore_if_needed()
+except Exception as exc:
+    restore_result = {"restored": False, "error": str(exc)}
+
 info = database_info()
+persistence_cfg = persistence_config()
+persistence_info = persistence_status()
 with st.sidebar:
     st.header("⚙️ Pengaturan")
     threshold = st.number_input("Filter Net Buy 3D (%)", min_value=0.0, max_value=100.0, value=65.0, step=1.0)
@@ -79,12 +89,28 @@ with st.sidebar:
     st.write(f"🏷️ Saham: {info['total_stocks']:,}")
     st.write(f"📅 Hari: {info['total_days']:,}")
     st.write(f"📖 Baris dengan field Bid/Offer: {info['orderbook_rows']:,}")
+    st.divider()
+    st.subheader("💾 Penyimpanan permanen")
+    if not persistence_cfg["enabled"]:
+        st.error("Belum aktif. Upload dikunci agar data tidak hilang saat redeploy.")
+        st.caption("Tambahkan GITHUB_TOKEN, GITHUB_REPO, dan GITHUB_RELEASE_TAG ke Streamlit Secrets.")
+    elif restore_result.get("restored"):
+        st.success(f"Database dipulihkan: {int(restore_result.get('rows', 0)):,} baris")
+    elif restore_result.get("error"):
+        st.error(f"Gagal memulihkan backup: {restore_result['error']}")
+    elif persistence_info.get("remote_available"):
+        st.success("Backup permanen tersedia")
+    else:
+        st.info("Backup permanen belum dibuat. Upload pertama akan membuatnya.")
 
 st.subheader("📂 Upload data BEI")
 st.caption(
     f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256. "
-    "Pilih file lalu tekan tombol Proses Upload."
+    "Pilih file lalu tekan tombol Proses Upload. Data hanya dianggap selesai setelah backup permanen berhasil."
 )
+
+if not persistence_cfg["enabled"]:
+    st.warning("🔒 Upload sementara dikunci. Kita tidak akan mengulangi kejadian data hilang: aktifkan Persistent Storage terlebih dahulu.")
 
 if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
@@ -96,9 +122,10 @@ with st.form("daily_upload_form", clear_on_submit=False):
         type=["xlsx", "xls"],
         accept_multiple_files=True,
         key=upload_key,
-        help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk.",
+        disabled=not persistence_cfg["enabled"],
+        help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk, kemudian snapshot SQLite dicadangkan secara permanen.",
     )
-    submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True)
+    submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"])
 
 if submitted:
     if not files:
@@ -154,19 +181,24 @@ if submitted:
 
     if all_frames:
         try:
-            with st.spinner("💾 Menulis batch ke SQLite secara bulk..."):
+            with st.spinner("💾 Menulis batch ke SQLite lalu membuat backup permanen..."):
                 result = save_upload_batch(all_frames, file_records)
+                backup_result = backup_database()
             progress.empty()
             st.success(
-                f"💾 Selesai: {result['files_saved']} file | "
+                f"💾 Selesai dan aman: {result['files_saved']} file | "
                 f"{result['rows_saved']:,} baris unik disimpan/di-update | "
-                f"{result['orderbook_rows']:,} snapshot orderbook tersimpan."
+                f"{result['orderbook_rows']:,} snapshot orderbook | "
+                f"backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
             )
             st.session_state.upload_generation += 1
             st.rerun()
         except Exception as exc:
             progress.empty()
-            st.error(f"❌ Gagal menyimpan batch. Tidak ada commit parsial: {exc}")
+            st.error(
+                "❌ Batch belum dianggap selesai karena backup permanen gagal. "
+                f"Data lokal mungkin sudah tersimpan, tetapi TIDAK akan kami anggap aman sebelum backup berhasil: {exc}"
+            )
 
 st.divider()
 data = load_data()
