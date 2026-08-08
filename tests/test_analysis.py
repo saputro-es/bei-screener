@@ -1,6 +1,9 @@
+import sqlite3
+
 import numpy as np
 import pandas as pd
 
+import modules.database as db
 from modules.analysis import screen, three_day_accumulation
 from modules.database import normalize_dataframe
 
@@ -50,3 +53,24 @@ def test_screen_filters_above_threshold():
     assert "signal" in result.columns
     assert "target_low" in result.columns
     assert "stop_loss" in result.columns
+
+
+def test_legacy_sqlite_schema_is_migrated(tmp_path, monkeypatch):
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(db, "DATABASE_FILE", db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE stock_daily (id INTEGER PRIMARY KEY, upload_date TEXT, source_file TEXT, stock_code TEXT, stock_name TEXT, trade_date TEXT, price REAL, volume REAL, net_buy_pct REAL)"
+        )
+        conn.execute("INSERT INTO stock_daily (upload_date, source_file, stock_code, stock_name, trade_date, price) VALUES ('2026-08-01','a.xlsx','AAA','Alpha','2026-08-01',1000)")
+        conn.execute("INSERT INTO stock_daily (upload_date, source_file, stock_code, stock_name, trade_date, price) VALUES ('2026-08-01','b.xlsx','AAA','Alpha','2026-08-01',1001)")
+        conn.commit()
+
+    db.init_database()
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_daily)")}
+        count = conn.execute("SELECT COUNT(*) FROM stock_daily WHERE trade_date='2026-08-01' AND stock_code='AAA'").fetchone()[0]
+        close = conn.execute("SELECT close_price FROM stock_daily WHERE trade_date='2026-08-01' AND stock_code='AAA'").fetchone()[0]
+    assert {"close_price", "foreign_buy", "foreign_sell", "raw_data"}.issubset(columns)
+    assert count == 1
+    assert close == 1001
