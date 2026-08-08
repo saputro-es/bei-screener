@@ -19,6 +19,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     data = df.copy()
+    for col in ["close_price", "volume", "high_price", "low_price"]:
+        if col not in data:
+            data[col] = np.nan
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     data = data.sort_values(["stock_code", "trade_date"]).copy()
 
@@ -46,6 +49,9 @@ def three_day_accumulation(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     data = df.copy()
+    for col in ["foreign_buy", "foreign_sell"]:
+        if col not in data:
+            data[col] = 0.0
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     data = data.dropna(subset=["stock_code", "trade_date"]).sort_values(["stock_code", "trade_date"])
     data["foreign_buy"] = pd.to_numeric(data["foreign_buy"], errors="coerce").fillna(0)
@@ -180,5 +186,6 @@ def screen(df: pd.DataFrame, threshold: float = 65.0) -> pd.DataFrame:
     result = pd.DataFrame(rows)
     if result.empty:
         return result
+    result = result[result["days_available"] >= 3]
     result = result[result["net_buy_pct_3d"] > threshold].copy()
     return result.sort_values(["net_buy_pct_3d", "score"], ascending=[False, False]).reset_index(drop=True)
