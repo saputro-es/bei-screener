@@ -11,7 +11,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATABASE_DIR = BASE_DIR / "database"
 DATABASE_FILE = DATABASE_DIR / "bei_screener.db"
 
-# Canonical columns used by the application.
 COLUMN_ALIASES = {
     "trade_date": ["Tanggal Perdagangan Terakhir", "Tanggal", "Trade Date", "Date"],
     "stock_code": ["Kode Saham", "Kode", "Ticker", "Symbol"],
@@ -26,6 +25,11 @@ COLUMN_ALIASES = {
     "foreign_sell": ["Foreign Sell", "Foreign Sell Volume", "Foreign Sell Value", "Asing Sell"],
     "foreign_buy": ["Foreign Buy", "Foreign Buy Volume", "Foreign Buy Value", "Asing Buy"],
 }
+
+OPTIONAL_COLUMNS = [
+    "company_name", "open_price", "high_price", "low_price", "close_price",
+    "volume", "value", "frequency", "foreign_sell", "foreign_buy",
+]
 
 
 def _find_column(columns: Iterable[str], aliases: list[str]) -> str | None:
@@ -42,7 +46,7 @@ def _find_column(columns: Iterable[str], aliases: list[str]) -> str | None:
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy with canonical columns while retaining all original columns."""
+    """Normalize common BEI column names while retaining original columns."""
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -54,31 +58,29 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if source is not None and canonical not in data.columns:
             data[canonical] = data[source]
 
-    if "stock_code" in data:
-        data["stock_code"] = data["stock_code"].astype(str).str.strip().str.upper()
-        data.loc[data["stock_code"].isin(["", "NAN", "NONE"]), "stock_code"] = pd.NA
+    required = {"trade_date", "stock_code"}
+    missing = required - set(data.columns)
+    if missing:
+        raise ValueError("Kolom wajib tidak ditemukan: " + ", ".join(sorted(missing)))
 
-    if "company_name" in data:
-        data["company_name"] = data["company_name"].astype(str).str.strip()
+    for col in OPTIONAL_COLUMNS:
+        if col not in data.columns:
+            data[col] = None
 
-    if "trade_date" in data:
-        parsed = pd.to_datetime(data["trade_date"], errors="coerce", dayfirst=True)
-        data["trade_date"] = parsed.dt.strftime("%Y-%m-%d")
+    data["stock_code"] = data["stock_code"].astype(str).str.strip().str.upper()
+    data.loc[data["stock_code"].isin(["", "NAN", "NONE"]), "stock_code"] = pd.NA
+    data["company_name"] = data["company_name"].where(data["company_name"].notna(), None)
+    data["company_name"] = data["company_name"].astype("string")
+
+    parsed = pd.to_datetime(data["trade_date"], errors="coerce", dayfirst=True)
+    data["trade_date"] = parsed.dt.strftime("%Y-%m-%d")
 
     numeric_columns = [
         "open_price", "high_price", "low_price", "close_price", "volume",
         "value", "frequency", "foreign_sell", "foreign_buy",
     ]
     for col in numeric_columns:
-        if col in data:
-            data[col] = pd.to_numeric(data[col], errors="coerce")
-
-    required = {"trade_date", "stock_code"}
-    missing = required - set(data.columns)
-    if missing:
-        raise ValueError(
-            "Kolom wajib tidak ditemukan: " + ", ".join(sorted(missing))
-        )
+        data[col] = pd.to_numeric(data[col], errors="coerce")
 
     return data
 
@@ -108,12 +110,8 @@ def init_database() -> None:
             )
             """
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trade_date ON stock_daily(trade_date)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_date ON stock_daily(trade_date)")
         conn.commit()
 
 
@@ -122,7 +120,6 @@ def save_dataframe(df: pd.DataFrame) -> int:
     data = normalize_dataframe(df)
     if data.empty:
         return 0
-
     init_database()
     data = data.dropna(subset=["trade_date", "stock_code"]).copy()
     if data.empty:
