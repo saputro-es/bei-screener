@@ -30,6 +30,16 @@ def sample_data(days=220):
     return pd.DataFrame(rows)
 
 
+def with_orderbook(raw: pd.DataFrame) -> pd.DataFrame:
+    data = raw.copy()
+    for level in range(1, 6):
+        data[f"Bid Price {level}"] = 1000 - level * 5
+        data[f"Bid Volume {level}"] = 900 - level * 25
+        data[f"Offer Price {level}"] = 1005 + level * 5
+        data[f"Offer Volume {level}"] = 100 - level * 5
+    return data
+
+
 def test_normalize_dataframe_creates_canonical_columns():
     data = normalize_dataframe(sample_data(3))
     assert {"trade_date", "stock_code", "close_price", "foreign_buy", "foreign_sell"}.issubset(data.columns)
@@ -84,24 +94,24 @@ def test_orderbook_pressure_is_computed():
 
 
 def test_embedded_dataframe_preserves_orderbook_levels_1_to_5():
-    raw = sample_data(3)
-    raw["Bid Price 1"] = 1000
-    raw["Bid Volume 1"] = 900
-    raw["Offer Price 1"] = 1005
-    raw["Offer Volume 1"] = 100
-    raw["Bid Price 2"] = 995
-    raw["Bid Volume 2"] = 500
-    raw["Offer Price 2"] = 1010
-    raw["Offer Volume 2"] = 100
-    raw["Bid Price 5"] = 980
-    raw["Bid Volume 5"] = 50
-    raw["Offer Price 5"] = 1025
-    raw["Offer Volume 5"] = 25
-    normalized = normalize_dataframe(raw)
+    normalized = normalize_dataframe(with_orderbook(sample_data(3)))
     assert normalized["bid_price_1"].notna().all()
     assert normalized["bid_volume_2"].notna().all()
     assert normalized["ask_price_5"].notna().all()
     assert normalized["ask_volume_5"].notna().all()
+
+
+def test_embedded_orderbook_is_persisted_once_with_daily_upload(tmp_path, monkeypatch):
+    db_path = tmp_path / "embedded.db"
+    monkeypatch.setattr(db, "DATABASE_FILE", db_path)
+    raw = with_orderbook(sample_data(3))
+    saved = db.save_dataframe(raw)
+    assert saved == 6
+    orderbook = db.load_orderbook(latest_only=True)
+    assert set(orderbook["stock_code"]) == {"AAA", "BBB"}
+    assert orderbook["bid_price_5"].notna().all()
+    assert orderbook["ask_volume_5"].notna().all()
+    assert len(orderbook) == 2
 
 
 def test_indicators_require_full_window_and_handle_no_loss_rsi():
