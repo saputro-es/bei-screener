@@ -48,7 +48,11 @@ def test_persist_rejects_empty_batch(monkeypatch):
 
 
 def test_persist_rejects_no_valid_daily_rows(monkeypatch):
-    monkeypatch.setattr(supabase_persistence, "_post_rpc", lambda payload: pytest.fail("RPC must not run"))
+    monkeypatch.setattr(
+        supabase_persistence,
+        "_post_rpc",
+        lambda payload, **kwargs: pytest.fail("RPC must not run"),
+    )
     bad = pd.DataFrame({"trade_date": [None], "stock_code": [None]})
     with pytest.raises(ValueError, match="valid"):
         supabase_persistence.persist_upload_batch([bad], [_record()])
