@@ -13,6 +13,7 @@ import requests
 import streamlit as st
 
 from .database import DATABASE_DIR, DATABASE_FILE, init_database
+from .supabase_persistence import config as supabase_config, status as supabase_status
 
 API_BASE = "https://api.github.com"
 DEFAULT_REPO = "saputro-es/bei-screener"
@@ -33,7 +34,15 @@ def config() -> dict[str, str | bool]:
     token = _secret("GITHUB_TOKEN")
     repo = _secret("GITHUB_REPO", DEFAULT_REPO)
     tag = _secret("GITHUB_RELEASE_TAG", DEFAULT_TAG)
-    return {"enabled": bool(token and repo), "token": token, "repo": repo, "tag": tag}
+    supabase_enabled = bool(supabase_config()["enabled"])
+    return {
+        "enabled": bool((token and repo) or supabase_enabled),
+        "github_enabled": bool(token and repo),
+        "supabase_enabled": supabase_enabled,
+        "token": token,
+        "repo": repo,
+        "tag": tag,
+    }
 
 
 def _headers(token: str, accept: str = "application/vnd.github+json") -> dict[str, str]:
@@ -51,8 +60,7 @@ def _request(method: str, url: str, token: str, **kwargs):
     merged.update(headers)
     response = requests.request(method, url, headers=merged, timeout=120, **kwargs)
     if response.status_code >= 400:
-        detail = response.text[:1000]
-        raise RuntimeError(f"GitHub API {response.status_code}: {detail}")
+        raise RuntimeError(f"GitHub API {response.status_code}: {response.text[:1000]}")
     return response
 
 
@@ -86,8 +94,7 @@ def _ensure_release(token: str, repo: str, tag: str) -> dict:
 
 
 def _assets(release: dict, token: str) -> list[dict]:
-    response = _request("GET", release["assets_url"], token, params={"per_page": 100})
-    return response.json()
+    return _request("GET", release["assets_url"], token, params={"per_page": 100}).json()
 
 
 def _database_has_rows() -> bool:
@@ -106,11 +113,14 @@ def status() -> dict[str, object]:
     result: dict[str, object] = {
         "enabled": cfg["enabled"],
         "configured": bool(cfg["enabled"]),
+        "github_enabled": cfg["github_enabled"],
+        "supabase_enabled": cfg["supabase_enabled"],
         "repo": cfg["repo"],
         "tag": cfg["tag"],
         "asset": ASSET_NAME,
         "local_rows": 0,
         "remote_available": False,
+        "supabase_reachable": False,
     }
     try:
         if DATABASE_FILE.exists():
@@ -118,24 +128,41 @@ def status() -> dict[str, object]:
                 result["local_rows"] = int(conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0])
     except sqlite3.Error:
         pass
-    if not cfg["enabled"]:
-        return result
-    try:
-        release = _release(str(cfg["token"]), str(cfg["repo"]), str(cfg["tag"]))
-        if release:
-            result["remote_available"] = any(asset.get("name") == ASSET_NAME for asset in _assets(release, str(cfg["token"])))
-    except Exception as exc:
-        result["error"] = str(exc)
+
+    if cfg["supabase_enabled"]:
+        sb = supabase_status()
+        result["supabase_reachable"] = bool(sb.get("reachable"))
+        result["supabase_historical_rows"] = int(sb.get("historical_rows", 0))
+        if sb.get("reachable"):
+            result["remote_available"] = True
+
+    if cfg["github_enabled"]:
+        try:
+            release = _release(str(cfg["token"]), str(cfg["repo"]), str(cfg["tag"]))
+            if release:
+                result["github_remote_available"] = any(
+                    asset.get("name") == ASSET_NAME for asset in _assets(release, str(cfg["token"]))
+                )
+                result["remote_available"] = bool(result["remote_available"] or result["github_remote_available"])
+        except Exception as exc:
+            result["github_error"] = str(exc)
     return result
 
 
 def restore_if_needed() -> dict[str, object]:
-    """Restore the persistent DB only when the current Streamlit instance has no data."""
+    """Restore SQLite from GitHub only when GitHub persistence is configured.
+
+    Supabase is the durable historical store and does not require a local
+    restore just to accept a new upload. SQLite is treated as an operational
+    cache in Supabase-only deployments.
+    """
     cfg = config()
-    if not cfg["enabled"]:
-        return {"restored": False, "reason": "persistence_not_configured"}
     if _database_has_rows():
         return {"restored": False, "reason": "local_data_present"}
+    if not cfg["github_enabled"]:
+        if cfg["supabase_enabled"]:
+            return {"restored": False, "reason": "supabase_primary_no_local_cache"}
+        return {"restored": False, "reason": "persistence_not_configured"}
 
     token = str(cfg["token"])
     repo = str(cfg["repo"])
@@ -154,13 +181,7 @@ def restore_if_needed() -> dict[str, object]:
     archive_path = temp_dir / ASSET_NAME
     restored_path = temp_dir / "bei_screener.db"
     try:
-        response = _request(
-            "GET",
-            asset["url"],
-            token,
-            headers={"Accept": "application/octet-stream"},
-            allow_redirects=True,
-        )
+        response = _request("GET", asset["url"], token, headers={"Accept": "application/octet-stream"}, allow_redirects=True)
         archive_path.write_bytes(response.content)
         with gzip.open(archive_path, "rb") as source, restored_path.open("wb") as target:
             shutil.copyfileobj(source, target)
@@ -179,21 +200,17 @@ def restore_if_needed() -> dict[str, object]:
 
 
 def backup_database() -> dict[str, object]:
-    """Upload a compressed SQLite snapshot to a GitHub Release asset.
-
-    The new snapshot is uploaded under a temporary name first. Only after the
-    upload succeeds is the previous snapshot removed and the new asset renamed
-    to the canonical name. This avoids deleting the last known-good backup
-    before a replacement has been uploaded successfully.
-    """
+    """Create the optional GitHub SQLite backup after the durable Supabase write."""
     cfg = config()
-    if not cfg["enabled"]:
-        raise RuntimeError(
-            "Persistent storage belum dikonfigurasi. Tambahkan GITHUB_TOKEN, "
-            "GITHUB_REPO, dan GITHUB_RELEASE_TAG ke Streamlit Secrets."
-        )
     if not _database_has_rows():
         raise RuntimeError("Tidak ada data di SQLite yang dapat dicadangkan.")
+    if not cfg["github_enabled"]:
+        if cfg["supabase_enabled"]:
+            return {"saved": True, "asset_size": 0, "rows": status()["local_rows"], "backend": "supabase"}
+        raise RuntimeError(
+            "Persistent storage belum dikonfigurasi. Tambahkan SUPABASE_SECRET_KEY "
+            "atau GITHUB_TOKEN ke Streamlit Secrets."
+        )
 
     init_database()
     token = str(cfg["token"])
@@ -210,25 +227,17 @@ def backup_database() -> dict[str, object]:
         with archive_path.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=6) as compressed:
             with DATABASE_FILE.open("rb") as source:
                 shutil.copyfileobj(source, compressed, length=1024 * 1024)
-
         upload_url = release["upload_url"].split("{", 1)[0]
-        upload_response = _request(
-            "POST",
-            upload_url,
-            token,
+        new_asset = _request(
+            "POST", upload_url, token,
             headers={"Content-Type": "application/gzip"},
             params={"name": temp_name},
             data=archive_path.read_bytes(),
-        )
-        new_asset = upload_response.json()
-
+        ).json()
         if old_asset:
             _request("DELETE", old_asset["url"], token)
-
         renamed = _request(
-            "PATCH",
-            new_asset["url"],
-            token,
+            "PATCH", new_asset["url"], token,
             json={"name": ASSET_NAME, "label": "Persistent BEI Screener SQLite snapshot"},
         ).json()
         return {
@@ -236,9 +245,9 @@ def backup_database() -> dict[str, object]:
             "asset_size": int(renamed.get("size", archive_path.stat().st_size)),
             "rows": status()["local_rows"],
             "release_tag": tag,
+            "backend": "github",
         }
     except Exception:
-        # Best effort cleanup of a temporary asset if the rename/delete sequence failed.
         try:
             release_now = _release(token, repo, tag)
             if release_now:

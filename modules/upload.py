@@ -14,6 +14,7 @@ from .database import (
     init_database,
     normalize_dataframe,
 )
+from .supabase_persistence import config as supabase_config, persist_upload_batch
 
 MAX_FILES_PER_BATCH = 20
 
@@ -60,15 +61,17 @@ def existing_hashes(hashes: Iterable[str]) -> set[str]:
 def save_upload_batch(
     frames: list[pd.DataFrame],
     file_records: list[dict],
-) -> dict[str, int]:
-    """Persist a whole upload batch in one SQLite transaction.
+) -> dict[str, int | bool | str | None]:
+    """Persist a whole upload batch.
 
-    Duplicate rows are collapsed by (trade_date, stock_code). Existing non-null
-    values are preserved when a later upload contains blanks. The embedded
-    five-level orderbook is stored in the same transaction.
+    When Supabase is configured it is the durable completion gate: remote
+    persistence succeeds before SQLite is committed. When Supabase is not
+    configured, the function retains the legacy local behavior so unit tests
+    and existing GitHub-backup deployments continue to work; the Streamlit UI
+    itself remains locked unless a durable backend is configured.
     """
     if not frames:
-        return {"rows_read": 0, "rows_saved": 0, "orderbook_rows": 0, "files_saved": 0}
+        return {"rows_read": 0, "rows_saved": 0, "orderbook_rows": 0, "files_saved": 0, "supabase_saved": False}
     if len(frames) > MAX_FILES_PER_BATCH:
         raise ValueError(f"Maksimal {MAX_FILES_PER_BATCH} file per batch.")
 
@@ -77,7 +80,15 @@ def save_upload_batch(
     data = data.dropna(subset=["trade_date", "stock_code"]).copy()
     data = data.drop_duplicates(subset=["trade_date", "stock_code"], keep="last")
     if data.empty:
-        return {"rows_read": int(sum(len(frame) for frame in frames)), "rows_saved": 0, "orderbook_rows": 0, "files_saved": 0}
+        raise ValueError("File tidak memiliki baris valid dengan tanggal dan kode saham.")
+
+    supabase_result: dict[str, object] = {
+        "saved": False,
+        "duplicate": False,
+        "upload_run_id": None,
+    }
+    if supabase_config()["enabled"]:
+        supabase_result = persist_upload_batch(frames, file_records)
 
     init_database()
     data = data.copy()
@@ -85,7 +96,6 @@ def save_upload_batch(
         if column not in data.columns:
             data[column] = None
 
-    # Keep raw_data for compatibility, but build it once per final unique row.
     raw_payloads = [json.dumps(row.to_dict(), default=str, ensure_ascii=False) for _, row in data.iterrows()]
     rows = []
     for values, raw_data in zip(data[DAILY_COLUMNS].itertuples(index=False, name=None), raw_payloads):
@@ -157,4 +167,7 @@ def save_upload_batch(
         "rows_saved": int(len(data)),
         "orderbook_rows": int(len(orderbook_rows)),
         "files_saved": int(len(records)),
+        "supabase_saved": bool(supabase_result.get("saved")),
+        "supabase_duplicate": bool(supabase_result.get("duplicate")),
+        "supabase_run_id": supabase_result.get("upload_run_id"),
     }
