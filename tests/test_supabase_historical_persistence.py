@@ -9,9 +9,8 @@ def test_rpc_migration_exists_and_is_non_destructive():
     sql = RPC_MIGRATION.read_text(encoding="utf-8").lower()
     assert "create or replace function persist_bei_historical_batch" in sql
     assert "security definer" in sql
-    assert "on conflict (upload_run_id,trade_date,stock_code) do update" in sql
-    assert "on conflict (upload_run_id,snapshot_date,snapshot_time,stock_code) do update" in sql
-    assert "on conflict (upload_run_id,trade_date,stock_code) do update" in sql
+    assert "on conflict (upload_run_id,trade_date,stock_code) where upload_run_id is not null do update" in sql
+    assert "on conflict (upload_run_id,snapshot_date,snapshot_time,stock_code) where upload_run_id is not null do update" in sql
     assert "revoke all on function" in sql
     assert "grant execute on function" in sql
     assert "drop " not in sql
