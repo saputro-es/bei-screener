@@ -92,15 +92,16 @@ def save_upload_batch(
     frames: list[pd.DataFrame],
     file_records: list[dict],
 ) -> dict[str, int]:
-    """Persist a whole upload batch in one SQLite transaction.
+    """Persist a whole upload batch and confirm durable persistence before completion.
+
+    SQLite remains the runtime database. When Supabase is configured, the complete
+    SQLite history is mirrored immediately after the local transaction commits.
+    The upload hash remains pending until that mirror succeeds, so a transient
+    Supabase failure can be retried safely. The Supabase RPC is idempotent.
 
     Duplicate rows are collapsed by (trade_date, stock_code). Existing non-null
     values are preserved when a later upload contains blanks. The embedded
     five-level orderbook is stored in the same transaction.
-
-    File hashes remain ``pending`` until the caller confirms durable persistence
-    (Supabase and/or the configured secondary backup). This prevents a failed
-    persistence attempt from making a file permanently look like a duplicate.
     """
     if not frames:
         return {"rows_read": 0, "rows_saved": 0, "orderbook_rows": 0, "files_saved": 0}
@@ -191,6 +192,14 @@ def save_upload_batch(
                 records,
             )
         conn.commit()
+
+    # Supabase is the durable historical layer. Import lazily to avoid a module
+    # cycle and to keep the SQLite upload path testable when Supabase is absent.
+    from .persistence import _supabase_config, sync_sqlite_to_supabase
+
+    if _supabase_config()["enabled"]:
+        sync_sqlite_to_supabase()
+        mark_persistence_complete(record["sha256"] for record in file_records)
 
     return {
         "rows_read": int(sum(len(frame) for frame in frames)),
