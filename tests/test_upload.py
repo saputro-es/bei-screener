@@ -78,8 +78,9 @@ def test_existing_hashes(monkeypatch, tmp_path):
     upload.existing_hashes(["seed"])
     with sqlite3.connect(upload.DATABASE_FILE) as conn:
         conn.execute(
-            "INSERT INTO upload_ledger (sha256, filename, size_bytes, rows_read, rows_saved) "
-            "VALUES ('known', 'known.xlsx', 1, 1, 1)"
+            "INSERT INTO upload_ledger "
+            "(sha256, filename, size_bytes, rows_read, rows_saved, persistence_status) "
+            "VALUES ('known', 'known.xlsx', 1, 1, 1, 'complete')"
         )
         conn.commit()
 
