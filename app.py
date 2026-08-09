@@ -116,16 +116,19 @@ if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
 upload_key = f"daily_upload_{st.session_state.upload_generation}"
 
-with st.form("daily_upload_form", clear_on_submit=False):
-    files = st.file_uploader(
-        "Pilih satu atau beberapa file Ringkasan Saham BEI",
-        type=["xlsx", "xls"],
-        accept_multiple_files=True,
-        key=upload_key,
-        disabled=not persistence_cfg["enabled"],
-        help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
-    )
-    submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"])
+# Do not override internal st.file_uploader DOM. A fixed-height Streamlit
+# container provides a safe scroll boundary while preserving native selection.
+with st.container(height=430, border=True):
+    with st.form("daily_upload_form", clear_on_submit=False):
+        files = st.file_uploader(
+            "Pilih satu atau beberapa file Ringkasan Saham BEI",
+            type=["xlsx", "xls"],
+            accept_multiple_files=True,
+            key=upload_key,
+            disabled=not persistence_cfg["enabled"],
+            help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
+        )
+        submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"])
 
 if submitted:
     if not files:
@@ -264,9 +267,6 @@ else:
     ]
     cols = [c for c in cols if c in display.columns]
 
-    # Keep the identity columns visible while horizontally scrolling the wide
-    # candidate table. This prevents company names from appearing detached from
-    # their stock codes on mobile screens.
     candidate_config = {
         "stock_code": st.column_config.TextColumn("Stock", pinned=True),
         "company_name": st.column_config.TextColumn("Company", pinned=True),
