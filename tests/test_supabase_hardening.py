@@ -60,10 +60,17 @@ def test_remote_duplicate_is_idempotent(monkeypatch):
         "_existing_remote_hashes",
         lambda hashes: set(hashes),
     )
-    monkeypatch.setattr(supabase_persistence, "_post_rpc", lambda payload: pytest.fail("RPC must not run"))
+    calls = []
+
+    def fake_post(payload, *, path):
+        calls.append(path)
+        return {"daily_updated": 1, "orderbook_updated": 1}
+
+    monkeypatch.setattr(supabase_persistence, "_post_rpc", fake_post)
     result = supabase_persistence.persist_upload_batch([_frame()], [_record()])
     assert result["saved"] is True
     assert result["duplicate"] is True
+    assert calls == [supabase_persistence.REPAIR_RPC_PATH]
 
 
 def test_partial_remote_duplicate_is_blocked(monkeypatch):
