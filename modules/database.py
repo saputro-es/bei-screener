@@ -33,12 +33,12 @@ ORDERBOOK_ALIASES = {
     "bid_price_1": ["Bid Price 1", "Bid1 Price", "Bid 1", "Best Bid", "Bid", "Harga Bid 1"],
     "bid_volume_1": ["Bid Volume 1", "Bid1 Volume", "Bid 1 Volume", "Bid Volume", "Best Bid Volume", "Volume Bid 1"],
     "ask_price_1": ["Offer Price 1", "Ask Price 1", "Offer1 Price", "Ask1 Price", "Offer 1", "Best Offer", "Offer", "Ask", "Harga Offer 1"],
-    "ask_volume_1": ["Offer Volume 1", "Ask Volume 1", "Offer1 Volume", "Ask1 Volume", "Offer 1 Volume", "Best Offer Volume", "Volume Offer 1"],
+    "ask_volume_1": ["Offer Volume", "Offer Volume 1", "Ask Volume", "Ask Volume 1", "Offer1 Volume", "Ask1 Volume", "Offer 1 Volume", "Best Offer Volume", "Volume Offer", "Volume Offer 1"],
 }
 for side, labels in (("bid", ("Bid",)), ("ask", ("Ask", "Offer"))):
     for level in range(2, 6):
-        ORDERBOOK_ALIASES[f"{side}_price_{level}"] = [f"{label} Price {level}" for label in labels] + [f"{label}{level} Price" for label in labels] + [f"{label} {level}" for label in labels] + [f"Harga {labels[-1]} {level}"]
-        ORDERBOOK_ALIASES[f"{side}_volume_{level}"] = [f"{label} Volume {level}" for label in labels] + [f"{label}{level} Volume" for label in labels] + [f"{label} {level} Volume" for label in labels] + [f"Volume {labels[-1]} {level}"]
+        ORDERBOOK_ALIASES[f"{side}_price_{level}"] = [f"{label} Price {level}" for label in labels] + [f"{label}{level} Price" for label in labels] + [f"{label} {level}" for label in labels] + [f"Harga {labels[-1]} {level}" for _ in [0]]
+        ORDERBOOK_ALIASES[f"{side}_volume_{level}"] = [f"{label} Volume {level}" for label in labels] + [f"{label}{level} Volume" for label in labels] + [f"{label} {level} Volume" for label in labels] + [f"Volume {labels[-1]} {level}" for _ in [0]]
 
 OPTIONAL_COLUMNS = ["company_name", "open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy"]
 DAILY_ORDERBOOK_COLUMNS = [f"{side}_{kind}_{level}" for level in range(1, 6) for side in ("bid", "ask") for kind in ("price", "volume")]
