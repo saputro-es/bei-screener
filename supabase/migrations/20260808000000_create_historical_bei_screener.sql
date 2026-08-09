@@ -117,42 +117,30 @@ CREATE TABLE IF NOT EXISTS technical_indicator_snapshot (
     CONSTRAINT technical_indicator_stock_code_not_blank CHECK (btrim(stock_code) <> '')
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_upload_ledger_sha256
-    ON upload_ledger (sha256);
-CREATE INDEX IF NOT EXISTS idx_upload_ledger_filename
-    ON upload_ledger (filename);
-CREATE INDEX IF NOT EXISTS idx_upload_ledger_run
-    ON upload_ledger (upload_run_id);
-CREATE INDEX IF NOT EXISTS idx_upload_runs_started_at
-    ON upload_runs (run_started_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_upload_ledger_sha256 ON upload_ledger (sha256);
+CREATE INDEX IF NOT EXISTS idx_upload_ledger_filename ON upload_ledger (filename);
+CREATE INDEX IF NOT EXISTS idx_upload_ledger_run ON upload_ledger (upload_run_id);
+CREATE INDEX IF NOT EXISTS idx_upload_runs_started_at ON upload_runs (run_started_at);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_stock_daily_run_date_code
     ON stock_daily (upload_run_id, trade_date, stock_code)
     WHERE upload_run_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_stock_daily_code_date
-    ON stock_daily (stock_code, trade_date);
-CREATE INDEX IF NOT EXISTS idx_stock_daily_trade_date
-    ON stock_daily (trade_date);
-CREATE INDEX IF NOT EXISTS idx_stock_daily_run
-    ON stock_daily (upload_run_id);
+CREATE INDEX IF NOT EXISTS idx_stock_daily_code_date ON stock_daily (stock_code, trade_date);
+CREATE INDEX IF NOT EXISTS idx_stock_daily_trade_date ON stock_daily (trade_date);
+CREATE INDEX IF NOT EXISTS idx_stock_daily_run ON stock_daily (upload_run_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orderbook_snapshot_run_key
     ON orderbook_snapshot (upload_run_id, snapshot_date, snapshot_time, stock_code)
     WHERE upload_run_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_orderbook_code_time
-    ON orderbook_snapshot (stock_code, snapshot_date, snapshot_time);
-CREATE INDEX IF NOT EXISTS idx_orderbook_run
-    ON orderbook_snapshot (upload_run_id);
-CREATE INDEX IF NOT EXISTS idx_orderbook_stock_daily
-    ON orderbook_snapshot (stock_daily_id);
+CREATE INDEX IF NOT EXISTS idx_orderbook_code_time ON orderbook_snapshot (stock_code, snapshot_date, snapshot_time);
+CREATE INDEX IF NOT EXISTS idx_orderbook_run ON orderbook_snapshot (upload_run_id);
+CREATE INDEX IF NOT EXISTS idx_orderbook_stock_daily ON orderbook_snapshot (stock_daily_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_technical_indicator_run_date_code
     ON technical_indicator_snapshot (upload_run_id, trade_date, stock_code)
     WHERE upload_run_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_technical_indicator_code_date
-    ON technical_indicator_snapshot (stock_code, trade_date);
-CREATE INDEX IF NOT EXISTS idx_technical_indicator_run
-    ON technical_indicator_snapshot (upload_run_id);
+CREATE INDEX IF NOT EXISTS idx_technical_indicator_code_date ON technical_indicator_snapshot (stock_code, trade_date);
+CREATE INDEX IF NOT EXISTS idx_technical_indicator_run ON technical_indicator_snapshot (upload_run_id);
 
 CREATE OR REPLACE VIEW latest_stock_daily AS
 SELECT DISTINCT ON (trade_date, stock_code) *
@@ -173,16 +161,24 @@ ALTER TABLE technical_indicator_snapshot ENABLE ROW LEVEL SECURITY;
 -- No Supabase authentication mechanism is currently present in the application.
 -- Keep historical tables closed to public reads/writes until an authenticated
 -- application role and explicit read policy are implemented.
-CREATE POLICY upload_runs_schema_stage_read ON upload_runs
-    FOR SELECT USING (false);
-CREATE POLICY upload_ledger_schema_stage_read ON upload_ledger
-    FOR SELECT USING (false);
-CREATE POLICY stock_daily_schema_stage_read ON stock_daily
-    FOR SELECT USING (false);
-CREATE POLICY orderbook_snapshot_schema_stage_read ON orderbook_snapshot
-    FOR SELECT USING (false);
-CREATE POLICY technical_indicator_schema_stage_read ON technical_indicator_snapshot
-    FOR SELECT USING (false);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'upload_runs' AND policyname = 'upload_runs_schema_stage_read') THEN
+        CREATE POLICY upload_runs_schema_stage_read ON upload_runs FOR SELECT USING (false);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'upload_ledger' AND policyname = 'upload_ledger_schema_stage_read') THEN
+        CREATE POLICY upload_ledger_schema_stage_read ON upload_ledger FOR SELECT USING (false);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'stock_daily' AND policyname = 'stock_daily_schema_stage_read') THEN
+        CREATE POLICY stock_daily_schema_stage_read ON stock_daily FOR SELECT USING (false);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'orderbook_snapshot' AND policyname = 'orderbook_snapshot_schema_stage_read') THEN
+        CREATE POLICY orderbook_snapshot_schema_stage_read ON orderbook_snapshot FOR SELECT USING (false);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'technical_indicator_snapshot' AND policyname = 'technical_indicator_schema_stage_read') THEN
+        CREATE POLICY technical_indicator_schema_stage_read ON technical_indicator_snapshot FOR SELECT USING (false);
+    END IF;
+END $$;
 
 COMMENT ON TABLE upload_runs IS 'Historical upload/run identity for append-only Supabase persistence.';
 COMMENT ON TABLE upload_ledger IS 'Upload file ledger mapped from the existing SQLite upload ledger.';
