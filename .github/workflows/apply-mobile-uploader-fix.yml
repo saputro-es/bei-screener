@@ -12,58 +12,38 @@ jobs:
   patch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Patch uploader UI
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply mobile uploader patch
+        shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
           p = Path('app.py')
           text = p.read_text(encoding='utf-8')
-          old = '''# Do not override internal st.file_uploader DOM. A fixed-height Streamlit
-# container provides a safe scroll boundary while preserving native selection.
-with st.container(height=430, border=True):
-    with st.form("daily_upload_form", clear_on_submit=False):
-        files = st.file_uploader(
-            "Pilih satu atau beberapa file Ringkasan Saham BEI",
-            type=["xlsx", "xls"],
-            accept_multiple_files=True,
-            key=upload_key,
-            disabled=not persistence_cfg["enabled"],
-            help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
-        )
-        submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"])
-'''
-          new = '''# Keep the native Streamlit uploader outside st.form. Mobile browsers can
-# fail to repaint the selected-file list when the uploader is nested in a
-# form/container; the separate button still gives us an explicit commit step.
-files = st.file_uploader(
-    "Pilih satu atau beberapa file Ringkasan Saham BEI",
-    type=["xlsx", "xls"],
-    accept_multiple_files=True,
-    key=upload_key,
-    disabled=not persistence_cfg["enabled"],
-    help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
-)
-
-if files:
-    st.success(f"📎 {len(files)} file siap diproses: " + ", ".join(file.name for file in files))
-
-submitted = st.button(
-    "🚀 Proses Upload",
-    type="primary",
-    use_container_width=True,
-    disabled=not persistence_cfg["enabled"] or not files,
-)
-'''
-          if old not in text:
-              raise SystemExit('expected uploader block not found')
-          p.write_text(text.replace(old, new), encoding='utf-8')
+          start = text.index('# Do not override internal st.file_uploader DOM.')
+          end_marker = 'if submitted:\n'
+          end = text.index(end_marker, start)
+          new = '''# Keep the native Streamlit uploader outside st.form. Some mobile browsers\n# fail to repaint the selected-file list when the uploader is nested in a\n# form/container. The separate button remains an explicit commit step.\nfiles = st.file_uploader(\n    "Pilih satu atau beberapa file Ringkasan Saham BEI",\n    type=["xlsx", "xls"],\n    accept_multiple_files=True,\n    key=upload_key,\n    disabled=not persistence_cfg["enabled"],\n    help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",\n)\n\nif files:\n    st.success(f"📎 {len(files)} file siap diproses: " + ", ".join(file.name for file in files))\n\nsubmitted = st.button(\n    "🚀 Proses Upload",\n    type="primary",\n    use_container_width=True,\n    disabled=not persistence_cfg["enabled"] or not files,\n)\n\n'''
+          p.write_text(text[:start] + new + text[end:], encoding='utf-8')
           PY
+
+      - name: Verify patch
+        run: |
+          python -m py_compile app.py
+          grep -n "Keep the native Streamlit uploader outside st.form" app.py
+          grep -n "st.file_uploader" app.py
+          grep -n "st.button" app.py
+
       - name: Commit patch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app.py
-          git diff --cached --quiet && exit 0
+          if git diff --cached --quiet; then
+            echo "No changes needed"
+            exit 0
+          fi
           git commit -m "fix: make mobile uploader selection visible"
           git push
