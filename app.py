@@ -116,6 +116,24 @@ if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
 upload_key = f"daily_upload_{st.session_state.upload_generation}"
 
+# Keep the selected-file list compact on mobile/desktop. Only the file list
+# scrolls; the uploader itself and the upload button remain in place.
+st.markdown(
+    """
+    <style>
+    [data-testid="stFileUploader"] section {
+        max-height: 430px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+    [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] {
+        flex-shrink: 0;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 with st.form("daily_upload_form", clear_on_submit=False):
     files = st.file_uploader(
         "Pilih satu atau beberapa file Ringkasan Saham BEI",
@@ -264,9 +282,6 @@ else:
     ]
     cols = [c for c in cols if c in display.columns]
 
-    # Keep the identity columns visible while horizontally scrolling the wide
-    # candidate table. This prevents company names from appearing detached from
-    # their stock codes on mobile screens.
     candidate_config = {
         "stock_code": st.column_config.TextColumn("Stock", pinned=True),
         "company_name": st.column_config.TextColumn("Company", pinned=True),
