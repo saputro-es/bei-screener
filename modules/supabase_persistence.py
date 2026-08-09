@@ -124,12 +124,18 @@ def status() -> dict[str, object]:
     try:
         response = requests.get(
             f"{cfg['url']}/rest/v1/stock_daily",
-            headers=_headers(str(cfg["key"])),
+            headers={**_headers(str(cfg["key"])), "Prefer": "count=exact"},
             params={"select": "id", "limit": 1},
             timeout=30,
         )
         if response.status_code >= 400:
             raise RuntimeError(f"Supabase {response.status_code}: {response.text[:1000]}")
+        content_range = response.headers.get("Content-Range", "")
+        if "/" in content_range:
+            try:
+                result["historical_rows"] = int(content_range.rsplit("/", 1)[1])
+            except ValueError:
+                pass
         result["reachable"] = True
     except Exception as exc:
         result["error"] = str(exc)
