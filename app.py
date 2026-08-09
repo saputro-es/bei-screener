@@ -7,6 +7,7 @@ import streamlit as st
 
 from modules.analysis import HORIZONS, screen
 from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, normalize_dataframe
+from modules.historical_repair import repair_frames
 from modules.orderbook import summarize_orderbook
 from modules.persistence import backup_database, config as persistence_config, restore_if_needed, status as persistence_status
 from modules.upload import MAX_FILES_PER_BATCH, existing_hashes, save_upload_batch, sha256_bytes
@@ -72,8 +73,6 @@ def _orderbook_sort_key(table: pd.DataFrame) -> pd.DataFrame:
 st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
 st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + five-level Bid/Offer snapshot")
 
-# Community Cloud does not guarantee persistence of files created at runtime.
-# Restore the last known-good SQLite snapshot before the first database read.
 try:
     restore_result = restore_if_needed()
 except Exception as exc:
@@ -105,8 +104,9 @@ with st.sidebar:
 
 st.subheader("📂 Upload data BEI")
 st.caption(
-    f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256. "
-    "Pilih file lalu tekan tombol Proses Upload. Data hanya dianggap selesai setelah backup permanen berhasil."
+    f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256, "
+    "kecuali jika dipilih ulang untuk memperbaiki field historis yang sebelumnya kosong. "
+    "Data hanya dianggap selesai setelah backup permanen berhasil."
 )
 
 if not persistence_cfg["enabled"]:
@@ -123,7 +123,7 @@ with st.form("daily_upload_form", clear_on_submit=False):
         accept_multiple_files=True,
         key=upload_key,
         disabled=not persistence_cfg["enabled"],
-        help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. Data semua file diproses lalu ditulis ke SQLite dalam satu transaksi bulk, kemudian snapshot SQLite dicadangkan secara permanen.",
+        help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
     )
     submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"])
 
@@ -141,18 +141,14 @@ if submitted:
     new_entries = [(file, file_sha) for file, file_sha in file_entries if file_sha not in already_uploaded]
 
     if already_uploaded:
-        st.info(f"♻️ {len(already_uploaded)} file sudah ada di database dan tidak akan diproses ulang.")
+        st.info(f"♻️ {len(already_uploaded)} file sudah ada. File akan diverifikasi dan diperbaiki hanya pada field historis yang kosong; ledger dan jumlah upload tidak bertambah.")
 
-    if not new_entries:
-        st.success("Semua file yang dipilih sudah pernah diimpor. Tidak ada pekerjaan database yang diulang.")
-        st.session_state.upload_generation += 1
-        st.rerun()
-
+    entries_to_read = new_entries if new_entries else file_entries
     all_frames: list[pd.DataFrame] = []
     file_records: list[dict] = []
-    progress = st.progress(0, text=f"Membaca 0/{len(new_entries)} file...")
+    progress = st.progress(0, text=f"Membaca 0/{len(entries_to_read)} file...")
 
-    for index, (file, file_sha) in enumerate(new_entries, start=1):
+    for index, (file, file_sha) in enumerate(entries_to_read, start=1):
         try:
             raw = pd.read_excel(BytesIO(file.getvalue()))
             normalized = normalize_dataframe(raw)
@@ -177,27 +173,37 @@ if submitted:
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
         finally:
-            progress.progress(index / len(new_entries), text=f"Membaca {index}/{len(new_entries)} file...")
+            progress.progress(index / len(entries_to_read), text=f"Membaca {index}/{len(entries_to_read)} file...")
 
     if all_frames:
         try:
-            with st.spinner("💾 Menulis batch ke SQLite lalu membuat backup permanen..."):
-                result = save_upload_batch(all_frames, file_records)
-                backup_result = backup_database()
+            with st.spinner("💾 Menyimpan dan memverifikasi batch..."):
+                if already_uploaded and not new_entries:
+                    repair_result = repair_frames(all_frames)
+                    result = save_upload_batch(all_frames, file_records)
+                    backup_result = backup_database()
+                    st.success(
+                        f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki "
+                        f"dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. "
+                        f"Ledger tidak bertambah; backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
+                    )
+                else:
+                    result = save_upload_batch(all_frames, file_records)
+                    backup_result = backup_database()
+                    st.success(
+                        f"💾 Selesai dan aman: {result['files_saved']} file | "
+                        f"{result['rows_saved']:,} baris unik disimpan/di-update | "
+                        f"{result['orderbook_rows']:,} snapshot orderbook | "
+                        f"backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
+                    )
             progress.empty()
-            st.success(
-                f"💾 Selesai dan aman: {result['files_saved']} file | "
-                f"{result['rows_saved']:,} baris unik disimpan/di-update | "
-                f"{result['orderbook_rows']:,} snapshot orderbook | "
-                f"backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
-            )
             st.session_state.upload_generation += 1
             st.rerun()
         except Exception as exc:
             progress.empty()
             st.error(
-                "❌ Batch belum dianggap selesai karena backup permanen gagal. "
-                f"Data lokal mungkin sudah tersimpan, tetapi TIDAK akan kami anggap aman sebelum backup berhasil: {exc}"
+                "❌ Batch belum dianggap selesai karena persistence/backup gagal. "
+                f"Tidak ada data yang akan kami anggap aman sebelum proses berhasil: {exc}"
             )
 
 st.divider()
