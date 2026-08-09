@@ -1,7 +1,6 @@
 -- Supabase PostgreSQL schema for BEI Screener historical persistence.
 -- Audited against the active SQLite schema and analysis implementation.
--- Additive/idempotent only. This migration contains no DROP, TRUNCATE,
--- DELETE FROM, or ON DELETE CASCADE operations.
+-- Additive/idempotent only; historical rows are never removed by this migration.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
