@@ -62,11 +62,13 @@ def save_upload_batch(
     frames: list[pd.DataFrame],
     file_records: list[dict],
 ) -> dict[str, int | bool | str | None]:
-    """Persist a whole upload batch with Supabase as the durable gate.
+    """Persist a whole upload batch.
 
-    Supabase is written first. Only after that succeeds do we commit the
-    operational SQLite copy and its local upload ledger. If Supabase rejects
-    or cannot persist the batch, SQLite is not touched by this function.
+    When Supabase is configured it is the durable completion gate: remote
+    persistence succeeds before SQLite is committed. When Supabase is not
+    configured, the function retains the legacy local behavior so unit tests
+    and existing GitHub-backup deployments continue to work; the Streamlit UI
+    itself remains locked unless a durable backend is configured.
     """
     if not frames:
         return {"rows_read": 0, "rows_saved": 0, "orderbook_rows": 0, "files_saved": 0, "supabase_saved": False}
@@ -80,15 +82,13 @@ def save_upload_batch(
     if data.empty:
         raise ValueError("File tidak memiliki baris valid dengan tanggal dan kode saham.")
 
-    # Durable historical persistence is the completion gate whenever Supabase
-    # credentials are configured. This makes a failed remote write retryable.
+    supabase_result: dict[str, object] = {
+        "saved": False,
+        "duplicate": False,
+        "upload_run_id": None,
+    }
     if supabase_config()["enabled"]:
         supabase_result = persist_upload_batch(frames, file_records)
-    else:
-        raise RuntimeError(
-            "Supabase historical persistence belum aktif. "
-            "Tambahkan SUPABASE_SECRET_KEY ke Streamlit Secrets sebelum upload."
-        )
 
     init_database()
     data = data.copy()
