@@ -14,6 +14,7 @@ from .database import DAILY_ORDERBOOK_COLUMNS, DATABASE_FILE, init_database, sav
 
 DEFAULT_SUPABASE_URL = "https://kgaxmrzyuzajeeuaatcb.supabase.co"
 RPC_PATH = "/rest/v1/rpc/persist_upload_batch"
+REPAIR_RPC_PATH = "/rest/v1/rpc/repair_historical_missing_fields"
 TIMEOUT_SECONDS = 120
 PAGE_SIZE = 1000
 
@@ -71,7 +72,7 @@ def _row_to_json(row: pd.Series) -> dict:
     return _json_safe(payload)
 
 
-def _post_rpc(payload: dict) -> dict:
+def _post_rpc(payload: dict, path: str = RPC_PATH) -> dict:
     cfg = config()
     if not cfg["enabled"]:
         raise RuntimeError(
@@ -80,7 +81,7 @@ def _post_rpc(payload: dict) -> dict:
         )
     try:
         response = requests.post(
-            f"{cfg['url']}{RPC_PATH}",
+            f"{cfg['url']}{path}",
             headers=_headers(str(cfg["key"])),
             json=payload,
             timeout=TIMEOUT_SECONDS,
@@ -221,9 +222,16 @@ def persist_upload_batch(frames: list[pd.DataFrame], file_records: list[dict]) -
 
     remote_hashes = _existing_remote_hashes([item["sha256"] for item in files])
     if len(remote_hashes) == len(files):
+        repair = _post_rpc(
+            {"p_daily": daily, "p_orderbook": orderbook},
+            path=REPAIR_RPC_PATH,
+        )
         return {
             "saved": True,
             "duplicate": True,
+            "repaired": True,
+            "repair_daily_rows": int(repair.get("daily_updated", 0)),
+            "repair_orderbook_rows": int(repair.get("orderbook_updated", 0)),
             "upload_run_id": None,
             "ledger_rows": 0,
             "daily_rows": 0,
