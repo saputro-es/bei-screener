@@ -13,7 +13,11 @@ import requests
 import streamlit as st
 
 from .database import DATABASE_DIR, DATABASE_FILE, init_database
-from .supabase_persistence import config as supabase_config, status as supabase_status
+from .supabase_persistence import (
+    config as supabase_config,
+    restore_from_supabase_if_needed,
+    status as supabase_status,
+)
 
 API_BASE = "https://api.github.com"
 DEFAULT_REPO = "saputro-es/bei-screener"
@@ -85,7 +89,7 @@ def _ensure_release(token: str, repo: str, tag: str) -> dict:
         "tag_name": tag,
         "target_commitish": "main",
         "name": "BEI Screener Data",
-        "body": "Persistent SQLite snapshot for the BEI Screener application. Managed automatically by the app.",
+        "body": "Secondary SQLite recovery snapshot for the BEI Screener application. Supabase is the primary durable store.",
         "draft": False,
         "prerelease": False,
         "generate_release_notes": False,
@@ -150,18 +154,32 @@ def status() -> dict[str, object]:
 
 
 def restore_if_needed() -> dict[str, object]:
-    """Restore SQLite from GitHub only when GitHub persistence is configured.
+    """Restore the operational SQLite cache from the primary store first.
 
-    Supabase is the durable historical store and does not require a local
-    restore just to accept a new upload. SQLite is treated as an operational
-    cache in Supabase-only deployments.
+    Supabase is authoritative. GitHub is only a secondary recovery snapshot.
+    If Supabase is configured but empty, GitHub may still be used as a legacy
+    recovery source so an older deployment is not stranded.
     """
-    cfg = config()
     if _database_has_rows():
         return {"restored": False, "reason": "local_data_present"}
+
+    cfg = config()
+    if cfg["supabase_enabled"]:
+        try:
+            supabase_result = restore_from_supabase_if_needed()
+            if supabase_result.get("restored") or supabase_result.get("rows", 0):
+                return supabase_result
+            if supabase_result.get("reason") not in {"supabase_empty", "supabase_has_no_valid_daily_rows"}:
+                return supabase_result
+        except Exception as exc:
+            # Do not silently accept a broken primary store when there is no
+            # secondary recovery path. With GitHub configured we can fall back.
+            if not cfg["github_enabled"]:
+                return {"restored": False, "reason": "supabase_restore_failed", "error": str(exc)}
+
     if not cfg["github_enabled"]:
         if cfg["supabase_enabled"]:
-            return {"restored": False, "reason": "supabase_primary_no_local_cache"}
+            return {"restored": False, "reason": "supabase_empty"}
         return {"restored": False, "reason": "persistence_not_configured"}
 
     token = str(cfg["token"])
@@ -194,7 +212,7 @@ def restore_if_needed() -> dict[str, object]:
         init_database()
         if not _database_has_rows():
             raise RuntimeError("Snapshot berhasil diunduh tetapi tidak berisi data saham.")
-        return {"restored": True, "rows": status()["local_rows"], "asset_size": asset.get("size", 0)}
+        return {"restored": True, "rows": status()["local_rows"], "asset_size": asset.get("size", 0), "backend": "github"}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -238,7 +256,7 @@ def backup_database() -> dict[str, object]:
             _request("DELETE", old_asset["url"], token)
         renamed = _request(
             "PATCH", new_asset["url"], token,
-            json={"name": ASSET_NAME, "label": "Persistent BEI Screener SQLite snapshot"},
+            json={"name": ASSET_NAME, "label": "Secondary SQLite recovery snapshot"},
         ).json()
         return {
             "saved": True,
