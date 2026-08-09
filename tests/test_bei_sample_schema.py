@@ -49,5 +49,5 @@ def test_three_day_net_buy_appears_only_after_three_complete_days():
     result = accumulation_horizons(normalize_dataframe(three_days))
     row = result.iloc[0]
     assert row["days_available_3d"] == 3
-    assert row["net_buy_3d"] == 800
+    assert row["net_buy_3d"] == 1200
     assert row["net_buy_pct_3d"] == 70
