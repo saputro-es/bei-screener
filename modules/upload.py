@@ -37,13 +37,23 @@ def _ensure_upload_ledger(conn: sqlite3.Connection) -> None:
             size_bytes INTEGER NOT NULL,
             rows_read INTEGER NOT NULL DEFAULT 0,
             rows_saved INTEGER NOT NULL DEFAULT 0,
-            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            persistence_status TEXT NOT NULL DEFAULT 'pending'
         )"""
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(upload_ledger)").fetchall()}
+    if "persistence_status" not in columns:
+        conn.execute(
+            "ALTER TABLE upload_ledger ADD COLUMN persistence_status TEXT NOT NULL DEFAULT 'pending'"
+        )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_upload_filename ON upload_ledger(filename)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_upload_persistence_status ON upload_ledger(persistence_status)"
+    )
 
 
 def existing_hashes(hashes: Iterable[str]) -> set[str]:
+    """Return only hashes whose durable persistence has been confirmed."""
     values = [str(value) for value in hashes if value]
     if not values:
         return set()
@@ -52,16 +62,42 @@ def existing_hashes(hashes: Iterable[str]) -> set[str]:
     with sqlite3.connect(DATABASE_FILE) as conn:
         _ensure_upload_ledger(conn)
         rows = conn.execute(
-            f"SELECT sha256 FROM upload_ledger WHERE sha256 IN ({placeholders})", values
+            f"SELECT sha256 FROM upload_ledger WHERE sha256 IN ({placeholders}) "
+            "AND persistence_status = 'complete'",
+            values,
         ).fetchall()
     return {row[0] for row in rows}
+
+
+def mark_persistence_complete(hashes: Iterable[str]) -> int:
+    """Mark uploaded files complete only after durable persistence succeeds."""
+    values = [str(value) for value in hashes if value]
+    if not values:
+        return 0
+    init_database()
+    placeholders = ",".join("?" for _ in values)
+    with sqlite3.connect(DATABASE_FILE, timeout=60) as conn:
+        _ensure_upload_ledger(conn)
+        conn.execute("PRAGMA busy_timeout=60000")
+        cursor = conn.execute(
+            f"UPDATE upload_ledger SET persistence_status = 'complete' "
+            f"WHERE sha256 IN ({placeholders}) AND persistence_status <> 'complete'",
+            values,
+        )
+        conn.commit()
+        return int(cursor.rowcount)
 
 
 def save_upload_batch(
     frames: list[pd.DataFrame],
     file_records: list[dict],
 ) -> dict[str, int]:
-    """Persist a whole upload batch in one SQLite transaction.
+    """Persist a whole upload batch and confirm durable persistence before completion.
+
+    SQLite remains the runtime database. When Supabase is configured, the complete
+    SQLite history is mirrored immediately after the local transaction commits.
+    The upload hash remains pending until that mirror succeeds, so a transient
+    Supabase failure can be retried safely. The Supabase RPC is idempotent.
 
     Duplicate rows are collapsed by (trade_date, stock_code). Existing non-null
     values are preserved when a later upload contains blanks. The embedded
@@ -85,7 +121,6 @@ def save_upload_batch(
         if column not in data.columns:
             data[column] = None
 
-    # Keep raw_data for compatibility, but build it once per final unique row.
     raw_payloads = [json.dumps(row.to_dict(), default=str, ensure_ascii=False) for _, row in data.iterrows()]
     rows = []
     for values, raw_data in zip(data[DAILY_COLUMNS].itertuples(index=False, name=None), raw_payloads):
@@ -134,6 +169,7 @@ def save_upload_batch(
                 int(record.get("size_bytes", 0)),
                 int(record.get("rows_read", 0)),
                 int(record.get("rows_saved", 0)),
+                "pending",
             )
         )
 
@@ -146,11 +182,24 @@ def save_upload_batch(
             conn.executemany(ob_sql, orderbook_rows)
         if records:
             conn.executemany(
-                "INSERT OR IGNORE INTO upload_ledger "
-                "(sha256, filename, size_bytes, rows_read, rows_saved) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO upload_ledger "
+                "(sha256, filename, size_bytes, rows_read, rows_saved, persistence_status) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(sha256) DO UPDATE SET "
+                "filename=excluded.filename, size_bytes=excluded.size_bytes, "
+                "rows_read=excluded.rows_read, rows_saved=excluded.rows_saved, "
+                "persistence_status='pending'",
                 records,
             )
         conn.commit()
+
+    # Supabase is the durable historical layer. Import lazily to avoid a module
+    # cycle and to keep the SQLite upload path testable when Supabase is absent.
+    from .persistence import _supabase_config, sync_sqlite_to_supabase
+
+    if _supabase_config()["enabled"]:
+        sync_sqlite_to_supabase()
+        mark_persistence_complete(record["sha256"] for record in file_records)
 
     return {
         "rows_read": int(sum(len(frame) for frame in frames)),
