@@ -116,34 +116,19 @@ if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
 upload_key = f"daily_upload_{st.session_state.upload_generation}"
 
-# Keep the selected-file list compact on mobile/desktop. Only the file list
-# scrolls; the uploader itself and the upload button remain in place.
-st.markdown(
-    """
-    <style>
-    [data-testid="stFileUploader"] section {
-        max-height: 430px;
-        overflow-y: auto;
-        overscroll-behavior: contain;
-    }
-    [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] {
-        flex-shrink: 0;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-with st.form("daily_upload_form", clear_on_submit=False):
-    files = st.file_uploader(
-        "Pilih satu atau beberapa file Ringkasan Saham BEI",
-        type=["xlsx", "xls"],
-        accept_multiple_files=True,
-        key=upload_key,
-        disabled=not persistence_cfg["enabled"],
-        help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
-    )
-    submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"])
+# Do not override internal st.file_uploader DOM. A fixed-height Streamlit
+# container provides a safe scroll boundary while preserving native selection.
+with st.container(height=430, border=True):
+    with st.form("daily_upload_form", clear_on_submit=False):
+        files = st.file_uploader(
+            "Pilih satu atau beberapa file Ringkasan Saham BEI",
+            type=["xlsx", "xls"],
+            accept_multiple_files=True,
+            key=upload_key,
+            disabled=not persistence_cfg["enabled"],
+            help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
+        )
+        submitted = st.form_submit_button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"])
 
 if submitted:
     if not files:
