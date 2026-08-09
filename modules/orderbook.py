@@ -12,7 +12,7 @@ def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
 
     Price levels and volume levels are tracked separately. A price-only snapshot
     is valid for spread/best-price diagnostics, but it must never be treated as
-    a depth/pressure snapshot when bid/offer volumes are missing.
+    a depth/pressure snapshot when either bid or offer volumes are missing.
     """
     output_columns = [
         "stock_code", "snapshot_date", "snapshot_time", "best_bid", "best_ask", "spread", "spread_pct",
@@ -61,14 +61,25 @@ def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
         (latest["bid_volume_levels"] == len(LEVELS)) & (latest["ask_volume_levels"] == len(LEVELS))
     )
 
-    # Depth metrics are only valid when both sides contain at least one volume.
     bid_depth = latest[bid_volume_cols].sum(axis=1, min_count=1)
     ask_depth = latest[ask_volume_cols].sum(axis=1, min_count=1)
     total_depth = bid_depth + ask_depth
     latest["bid_depth_5"] = bid_depth
     latest["ask_depth_5"] = ask_depth
-    latest["book_pressure_pct"] = np.where(total_depth > 0, bid_depth / total_depth * 100, np.nan)
-    latest["orderbook_imbalance_pct"] = np.where(total_depth > 0, (bid_depth - ask_depth) / total_depth * 100, np.nan)
+
+    # Pressure/imbalance is valid only when BOTH sides contain volume data.
+    # Missing offer volume must never be interpreted as zero offer volume.
+    both_sides_volume = (
+        latest["bid_volume_levels"].gt(0)
+        & latest["ask_volume_levels"].gt(0)
+        & total_depth.gt(0)
+    )
+    latest["book_pressure_pct"] = np.where(
+        both_sides_volume, bid_depth / total_depth * 100, np.nan
+    )
+    latest["orderbook_imbalance_pct"] = np.where(
+        both_sides_volume, (bid_depth - ask_depth) / total_depth * 100, np.nan
+    )
 
     bid1 = latest["bid_price_1"]
     ask1 = latest["ask_price_1"]
@@ -80,7 +91,7 @@ def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
 
     def pressure_label(value: float) -> str:
         if not np.isfinite(value):
-            return "⚪ VOLUME BID/OFFER TIDAK TERSEDIA"
+            return "⚪ VOLUME BID/OFFER TIDAK LENGKAP"
         if value >= 65:
             return "🟢 BID DOMINAN"
         if value >= 55:
