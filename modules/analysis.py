@@ -72,12 +72,19 @@ def accumulation_horizons(df: pd.DataFrame, horizons: tuple[int, ...] = HORIZONS
     for code, group in data.groupby("stock_code"):
         group = group.drop_duplicates("trade_date", keep="last")
         row: dict = {"stock_code": code, "latest_date": group["trade_date"].max()}
+        available_days = len(group)
         for days in horizons:
             recent = group.tail(days)
+            n = len(recent)
+            row[f"days_available_{days}d"] = n
+            if n < days:
+                # Never present a partial horizon as a valid Net Buy percentage.
+                row[f"net_buy_{days}d"] = np.nan
+                row[f"net_buy_pct_{days}d"] = np.nan
+                continue
             buy = recent["foreign_buy"].sum()
             sell = recent["foreign_sell"].sum()
             total = buy + sell
-            row[f"days_available_{days}d"] = len(recent)
             row[f"net_buy_{days}d"] = buy - sell
             row[f"net_buy_pct_{days}d"] = buy / total * 100 if total > 0 else np.nan
         rows.append(row)
