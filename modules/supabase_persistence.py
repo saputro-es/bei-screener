@@ -26,11 +26,7 @@ def _secret(name: str, default: str = "") -> str:
 def config() -> dict[str, str | bool]:
     url = _secret("SUPABASE_URL", DEFAULT_SUPABASE_URL).rstrip("/")
     key = _secret("SUPABASE_SECRET_KEY") or _secret("SUPABASE_SERVICE_ROLE_KEY")
-    return {
-        "enabled": bool(url and key),
-        "url": url,
-        "key": key,
-    }
+    return {"enabled": bool(url and key), "url": url, "key": key}
 
 
 def _headers(key: str) -> dict[str, str]:
@@ -86,14 +82,31 @@ def _post_rpc(payload: dict) -> dict:
         timeout=TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        detail = response.text[:2000]
-        raise RuntimeError(f"Supabase RPC {response.status_code}: {detail}")
+        raise RuntimeError(f"Supabase RPC {response.status_code}: {response.text[:2000]}")
     body = response.json()
     if isinstance(body, list) and body and isinstance(body[0], dict):
         return body[0]
     if not isinstance(body, dict):
         raise RuntimeError("Supabase RPC mengembalikan format yang tidak dikenal.")
     return body
+
+
+def _existing_remote_hashes(hashes: list[str]) -> set[str]:
+    """Return upload hashes already committed in Supabase."""
+    cfg = config()
+    values = sorted({str(value) for value in hashes if value})
+    if not cfg["enabled"] or not values:
+        return set()
+    response = requests.get(
+        f"{cfg['url']}/rest/v1/upload_ledger",
+        headers=_headers(str(cfg["key"])),
+        params={"select": "sha256", "sha256": f"in.({','.join(values)})"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Supabase upload ledger {response.status_code}: {response.text[:2000]}")
+    body = response.json()
+    return {str(item["sha256"]) for item in body if isinstance(item, dict) and item.get("sha256")}
 
 
 def status() -> dict[str, object]:
@@ -161,31 +174,42 @@ def _orderbook_payload(daily_rows: list[dict]) -> list[dict]:
 
 
 def persist_upload_batch(frames: list[pd.DataFrame], file_records: list[dict]) -> dict[str, object]:
-    """Persist one successful SQLite upload batch atomically in Supabase.
-
-    SQLite remains the existing operational database. This function is an
-    additional historical write path; it never clears, deletes, or rewrites
-    SQLite data.
-    """
+    """Persist one upload batch to Supabase before local completion is recorded."""
     daily = _daily_payload(frames)
     orderbook = _orderbook_payload(daily)
-    files = []
-    for record in file_records:
-        files.append(
-            {
-                "sha256": str(record["sha256"]),
-                "filename": str(record["filename"]),
-                "size_bytes": int(record.get("size_bytes", 0)),
-                "rows_read": int(record.get("rows_read", 0)),
-                "rows_saved": int(record.get("rows_saved", 0)),
-                "metadata": _json_safe(record.get("metadata", {})),
+    files = [
+        {
+            "sha256": str(record["sha256"]),
+            "filename": str(record["filename"]),
+            "size_bytes": int(record.get("size_bytes", 0)),
+            "rows_read": int(record.get("rows_read", 0)),
+            "rows_saved": int(record.get("rows_saved", 0)),
+            "metadata": _json_safe(record.get("metadata", {})),
+        }
+        for record in file_records
+    ]
+
+    remote_hashes = _existing_remote_hashes([item["sha256"] for item in files])
+    if remote_hashes:
+        if len(remote_hashes) == len(files):
+            return {
+                "saved": True,
+                "duplicate": True,
+                "upload_run_id": None,
+                "ledger_rows": 0,
+                "daily_rows": 0,
+                "orderbook_rows": 0,
             }
+        raise RuntimeError(
+            "Batch upload sebagian sudah tercatat di Supabase. "
+            "Pisahkan file yang sudah pernah berhasil dari file baru sebelum retry."
         )
+
     result = _post_rpc(
         {
             "p_run": {
                 "source": "app_upload",
-                "note": f"SQLite batch: {len(files)} file(s), {len(daily)} unique daily row(s)",
+                "note": f"BEI batch: {len(files)} file(s), {len(daily)} unique daily row(s)",
             },
             "p_files": files,
             "p_daily": daily,
@@ -194,6 +218,7 @@ def persist_upload_batch(frames: list[pd.DataFrame], file_records: list[dict]) -
     )
     return {
         "saved": True,
+        "duplicate": False,
         "upload_run_id": result.get("upload_run_id"),
         "ledger_rows": int(result.get("ledger_rows", 0)),
         "daily_rows": int(result.get("daily_rows", 0)),
