@@ -263,7 +263,21 @@ else:
         "Target Low", "Target High", "Stop Loss",
     ]
     cols = [c for c in cols if c in display.columns]
-    st.dataframe(display[cols], use_container_width=True, hide_index=True)
+
+    # Keep the identity columns visible while horizontally scrolling the wide
+    # candidate table. This prevents company names from appearing detached from
+    # their stock codes on mobile screens.
+    candidate_config = {
+        "stock_code": st.column_config.TextColumn("Stock", pinned=True),
+        "company_name": st.column_config.TextColumn("Company", pinned=True),
+        "close_price": st.column_config.NumberColumn("Close", format="%.0f"),
+    }
+    st.dataframe(
+        display[cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={k: v for k, v in candidate_config.items() if k in cols},
+    )
 
     st.subheader("🎯 Detail kandidat")
     for _, row in screened.head(100).iterrows():
@@ -286,8 +300,7 @@ else:
             st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
             st.write(
                 f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | "
-                f"Status: {row.get('orderbook_status', '-')} | "
-                f"Pressure {_fmt(row.get('book_pressure_pct'), 2)}% | "
+                f"Status: {row.get('orderbook_status', '-')} | Pressure {_fmt(row.get('book_pressure_pct'), 2)}% | "
                 f"Imbalance {_fmt(row.get('orderbook_imbalance_pct'), 2)}%"
             )
             st.write(f"**Alasan:** {row.get('reason', '-')}")
@@ -304,4 +317,20 @@ if orderbook.empty:
     st.info("File BEI belum menyediakan level Bid/Offer yang dapat dibaca.")
 else:
     safe_orderbook = _orderbook_sort_key(orderbook)
-    st.dataframe(safe_orderbook, use_container_width=True, hide_index=True)
+    orderbook_config = {
+        "stock_code": st.column_config.TextColumn("Stock", pinned=True),
+        "best_bid": st.column_config.NumberColumn("Best Bid", format="%.0f"),
+        "best_ask": st.column_config.NumberColumn("Best Ask", format="%.0f"),
+        "spread": st.column_config.NumberColumn("Spread", format="%.0f"),
+        "spread_pct": st.column_config.NumberColumn("Spread %", format="%.2f%%"),
+        "bid_depth_5": st.column_config.NumberColumn("Bid Depth L1-L5", format="%.0f"),
+        "ask_depth_5": st.column_config.NumberColumn("Offer Depth L1-L5", format="%.0f"),
+        "book_pressure_pct": st.column_config.NumberColumn("Bid Pressure %", format="%.2f%%"),
+        "orderbook_imbalance_pct": st.column_config.NumberColumn("Imbalance %", format="%.2f%%"),
+    }
+    st.dataframe(
+        safe_orderbook,
+        use_container_width=True,
+        hide_index=True,
+        column_config={k: v for k, v in orderbook_config.items() if k in safe_orderbook.columns},
+    )
