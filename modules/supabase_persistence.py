@@ -16,7 +16,7 @@ from .database import DAILY_ORDERBOOK_COLUMNS, DATABASE_FILE, init_database, sav
 DEFAULT_SUPABASE_URL = "https://kgaxmrzyuzajeeuaatcb.supabase.co"
 RPC_PATH = "/rest/v1/rpc/persist_upload_batch"
 REPAIR_RPC_PATH = "/rest/v1/rpc/repair_historical_missing_fields"
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 900
 PAGE_SIZE = 1000
 
 def _secret(name: str, default: str = "") -> str:
