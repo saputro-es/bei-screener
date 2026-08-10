@@ -75,6 +75,28 @@ def _normalise_codes(data: pd.DataFrame, column: str) -> None:
     data.loc[data[column].isin(["", "NAN", "NONE", "<NA>"]), column] = pd.NA
 
 
+def _parse_trade_dates(values: pd.Series) -> pd.Series:
+    """Parse dates without guessing the meaning of an ISO date string."""
+    parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    for index, value in values.items():
+        if pd.isna(value):
+            continue
+        if isinstance(value, pd.Timestamp):
+            parsed.loc[index] = value.normalize()
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if len(text) == 8 and text.isdigit():
+            parsed.loc[index] = pd.to_datetime(text, format="%Y%m%d", errors="coerce")
+            continue
+        if len(text) >= 10 and text[0:4].isdigit() and text[4] == "-" and text[7] == "-":
+            parsed.loc[index] = pd.to_datetime(text[:10], format="%Y-%m-%d", errors="coerce")
+            continue
+        parsed.loc[index] = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    return parsed.dt.normalize()
+
+
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -93,7 +115,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             data[col] = None
     _normalise_codes(data, "stock_code")
     data["company_name"] = data["company_name"].astype("string")
-    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
+    data["trade_date"] = _parse_trade_dates(data["trade_date"]).dt.strftime("%Y-%m-%d")
     for col in NUMERIC_DAILY_COLUMNS:
         data[col] = pd.to_numeric(data[col], errors="coerce")
     return data
@@ -115,7 +137,7 @@ def normalize_orderbook_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "snapshot_time" not in data.columns:
         data["snapshot_time"] = "00:00:00"
     _normalise_codes(data, "stock_code")
-    data["snapshot_date"] = pd.to_datetime(data["snapshot_date"], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
+    data["snapshot_date"] = _parse_trade_dates(data["snapshot_date"]).dt.strftime("%Y-%m-%d")
     data["snapshot_time"] = data["snapshot_time"].astype(str).replace({"nan": "00:00:00", "NaT": "00:00:00", "None": "00:00:00"})
     for col in DAILY_ORDERBOOK_COLUMNS:
         if col not in data.columns:
