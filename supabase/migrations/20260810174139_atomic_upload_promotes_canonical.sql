@@ -1,0 +1,4 @@
+-- Historical migration marker retained so local migration history matches the
+-- production Supabase migration version 20260810174139.
+-- The current main branch contains the resulting atomic promotion behavior in
+-- the canonical persistence migrations that follow.

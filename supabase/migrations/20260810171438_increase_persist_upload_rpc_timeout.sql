@@ -1,0 +1,4 @@
+-- Historical migration marker retained so local migration history matches the
+-- production Supabase migration version 20260810171438.
+-- The equivalent timeout change is maintained in the later 20260811000001
+-- migration on the main branch.

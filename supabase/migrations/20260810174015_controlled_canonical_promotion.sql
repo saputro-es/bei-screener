@@ -1,0 +1,4 @@
+-- Historical migration marker retained so local migration history matches the
+-- production Supabase migration version 20260810174015.
+-- The equivalent canonical-promotion definition is maintained in the later
+-- 20260811000001_controlled_canonical_promotion.sql migration.
