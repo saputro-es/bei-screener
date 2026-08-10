@@ -70,22 +70,7 @@ def _remote_signature(cfg: dict[str, str | bool]) -> tuple[int, str | None]:
     return int(total), str(latest) if latest else None
 
 
-def sync_local_from_supabase() -> dict[str, object]:
-    """Reconcile the local SQLite read model with canonical Supabase history.
-
-    Uploads are committed to Supabase before local completion is reported, so Supabase
-    is the canonical source. If the local read model has a different row count or
-    latest trade date, replace the local read model with the canonical remote rows.
-    """
-    cfg = config()
-    if not cfg["enabled"]:
-        return {"synced": False, "reason": "supabase_disabled"}
-
-    local_count, local_latest = _local_signature()
-    remote_count, remote_latest = _remote_signature(cfg)
-    if local_count == remote_count and local_latest == remote_latest:
-        return {"synced": False, "reason": "already_current", "rows": local_count}
-
+def _replace_local_with_remote(cfg: dict[str, str | bool], remote_count: int, remote_latest: str | None) -> dict[str, object]:
     daily_rows = _fetch_all(cfg, "stock_daily")
     orderbook_rows = _fetch_all(cfg, "orderbook_snapshot")
     if len(daily_rows) != remote_count:
@@ -140,3 +125,22 @@ def sync_local_from_supabase() -> dict[str, object]:
         "orderbook_rows": len(orderbook_rows),
         "latest_date": remote_latest,
     }
+
+
+def sync_local_from_supabase(force: bool = False) -> dict[str, object]:
+    """Reconcile SQLite with canonical Supabase data.
+
+    A forced sync is intended for a fresh app session so a stale local database cannot
+    masquerade as current data merely because its row count and latest date happen to
+    match. The remote dataset is fetched and verified before replacing the local read model.
+    """
+    cfg = config()
+    if not cfg["enabled"]:
+        return {"synced": False, "reason": "supabase_disabled"}
+
+    local_count, local_latest = _local_signature()
+    remote_count, remote_latest = _remote_signature(cfg)
+    if not force and local_count == remote_count and local_latest == remote_latest:
+        return {"synced": False, "reason": "already_current", "rows": local_count}
+
+    return _replace_local_with_remote(cfg, remote_count, remote_latest)

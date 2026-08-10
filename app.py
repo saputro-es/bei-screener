@@ -86,10 +86,17 @@ try:
 except Exception as exc:
     restore_result = {"restored": False, "error": str(exc)}
 
-try:
-    sync_result = sync_local_from_supabase()
-except Exception as exc:
-    sync_result = {"synced": False, "reason": "sync_error", "error": str(exc)}
+# Supabase is the canonical analytical dataset. Check it once per browser session so
+# an old restored SQLite file cannot silently feed stale prices/indicators into the UI.
+if not st.session_state.get("canonical_sync_checked"):
+    try:
+        sync_result = sync_local_from_supabase(force=True)
+    except Exception as exc:
+        sync_result = {"synced": False, "reason": "sync_error", "error": str(exc)}
+    st.session_state.canonical_sync_checked = True
+    st.session_state.canonical_sync_result = sync_result
+else:
+    sync_result = st.session_state.get("canonical_sync_result", {"synced": False, "reason": "already_checked"})
 
 if sync_result.get("synced"):
     st.info(
@@ -97,7 +104,11 @@ if sync_result.get("synced"):
         f"{int(sync_result.get('rows', 0)):,} baris | tanggal terakhir {sync_result.get('latest_date', '-')}"
     )
 elif sync_result.get("reason") == "sync_error":
-    st.warning(f"⚠️ Sinkronisasi histori kanonik gagal; data lokal dipertahankan sementara: {sync_result.get('error', '-')}")
+    st.error(
+        "⚠️ Sumber kanonik tidak dapat diverifikasi. Analisis baru dikunci agar aplikasi tidak menampilkan angka dari data lokal yang mungkin stale. "
+        f"Detail: {sync_result.get('error', '-')}"
+    )
+    st.stop()
 
 info = database_info()
 persistence_cfg = persistence_config()
@@ -272,14 +283,20 @@ else:
     display["Target Low"] = display["target_low"].round(0)
     display["Target High"] = display["target_high"].round(0)
     display["Stop Loss"] = display["stop_loss"].round(0)
-    cols = ["stock_code", "company_name", "close_price"] + [f"NB {d}D %" for d in HORIZONS] + ["signal", "quality", "Score", "technical_status", "RSI14", "SMA20", "SMA50", "SMA200", "Vol Ratio", "OB Pressure %", "OB Imbalance %", "orderbook_signal", "orderbook_status", "Target Low", "Target High", "Stop Loss"]
+    cols = ["stock_code", "company_name", "as_of_date", "close_price"] + [f"NB {d}D %" for d in HORIZONS] + ["signal", "quality", "Score", "technical_status", "RSI14", "SMA20", "SMA50", "SMA200", "Vol Ratio", "OB Pressure %", "OB Imbalance %", "orderbook_signal", "orderbook_status", "Target Low", "Target High", "Stop Loss"]
     cols = [c for c in cols if c in display.columns]
-    candidate_config = {"stock_code": st.column_config.TextColumn("Stock", pinned=True), "company_name": st.column_config.TextColumn("Company", pinned=True), "close_price": st.column_config.NumberColumn("Close", format="%.0f")}
+    candidate_config = {
+        "stock_code": st.column_config.TextColumn("Stock", pinned=True),
+        "company_name": st.column_config.TextColumn("Company", pinned=True),
+        "as_of_date": st.column_config.TextColumn("Data per", help="Tanggal perdagangan terakhir yang menjadi sumber Close dan indikator kandidat."),
+        "close_price": st.column_config.NumberColumn("Close", format="%.0f"),
+    }
     st.dataframe(display[cols], use_container_width=True, hide_index=True, column_config={k: v for k, v in candidate_config.items() if k in cols})
 
     st.subheader("🎯 Detail kandidat")
     for _, row in screened.head(100).iterrows():
         with st.expander(f"{row['stock_code']} — {row.get('signal', '-')} | 3D {row.get('net_buy_pct_3d', float('nan')):.2f}% | Score {row.get('score', 0):.2f}"):
+            st.caption(f"**Data per: {pd.Timestamp(row.get('as_of_date')).strftime('%Y-%m-%d') if pd.notna(row.get('as_of_date')) else '-'}** — Close dan seluruh indikator di bawah berasal dari histori sampai tanggal ini.")
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Close", _fmt(row.get("close_price")))
             c2.metric("RSI14", _fmt(row.get("rsi14"), 1))
@@ -295,7 +312,7 @@ else:
             st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
             st.write(f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Status: {row.get('orderbook_status', '-')} | Pressure {_fmt(row.get('book_pressure_pct'), 2)}% | Imbalance {_fmt(row.get('orderbook_imbalance_pct'), 2)}%")
             st.write(f"**Alasan:** {row.get('reason', '-')}")
-            st.write(f"**Target 1 minggu (indikatif):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
+            st.write(f"**Target 1 minggu (indikatif, berbasis ATR14 aktual):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
 
 st.divider()
 st.subheader("🔎 Detail histori harga")
