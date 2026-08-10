@@ -102,6 +102,17 @@ with st.sidebar:
     else:
         st.info("Backup permanen belum dibuat. Upload pertama akan membuatnya.")
 
+# Keep the last upload result visible after the deliberate Streamlit rerun.
+# This is UI/session state only; it does not alter the persisted dataset.
+if "upload_notice" in st.session_state:
+    upload_notice = st.session_state.pop("upload_notice")
+    if upload_notice["kind"] == "success":
+        st.success(upload_notice["message"])
+    elif upload_notice["kind"] == "info":
+        st.info(upload_notice["message"])
+    else:
+        st.error(upload_notice["message"])
+
 st.subheader("📂 Upload data BEI")
 st.caption(
     f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256, "
@@ -193,29 +204,33 @@ if submitted:
                     repair_result = repair_frames(all_frames)
                     result = save_upload_batch(all_frames, file_records)
                     backup_result = backup_database()
-                    st.success(
+                    message = (
                         f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki "
                         f"dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. "
                         f"Ledger tidak bertambah; backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
                     )
+                    st.session_state.upload_notice = {"kind": "success", "message": message}
                 else:
                     result = save_upload_batch(all_frames, file_records)
                     backup_result = backup_database()
-                    st.success(
+                    message = (
                         f"💾 Selesai dan aman: {result['files_saved']} file | "
                         f"{result['rows_saved']:,} baris unik disimpan/di-update | "
                         f"{result['orderbook_rows']:,} snapshot orderbook | "
                         f"backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
                     )
+                    st.session_state.upload_notice = {"kind": "success", "message": message}
             progress.empty()
             st.session_state.upload_generation += 1
             st.rerun()
         except Exception as exc:
             progress.empty()
-            st.error(
-                "❌ Batch belum dianggap selesai karena persistence/backup gagal. "
-                f"Tidak ada data yang akan kami anggap aman sebelum proses berhasil: {exc}"
-            )
+            st.session_state.upload_notice = {
+                "kind": "error",
+                "message": "❌ Batch belum dianggap selesai karena persistence/backup gagal. "
+                f"Data tidak akan kami anggap aman sebelum proses berhasil: {exc}",
+            }
+            st.rerun()
 
 st.divider()
 data = load_data()
