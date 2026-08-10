@@ -75,3 +75,5 @@ GitHub Actions runs compile checks and the test suite on pushes and pull request
 ## Important
 
 This is a rule-based research screener, not a guarantee of future price movement. Orderbook snapshots are point-in-time data and can change rapidly. Target/stop-loss outputs are indicative risk references.
+
+<!-- deployment-verification: 2026-08-10T14:14+07:00 -->
