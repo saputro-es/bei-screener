@@ -28,12 +28,38 @@ def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def _atr_group(group: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate ATR from valid trading observations only.
+
+    Some BEI exports use 0 for unavailable OHLC fields on inactive/suspended
+    rows. Those zeros are sentinels, not prices; treating them as prices would
+    create an artificial true range roughly equal to the previous close and
+    corrupt ATR-based targets/stops.
+    """
     high = pd.to_numeric(group["high_price"], errors="coerce")
     low = pd.to_numeric(group["low_price"], errors="coerce")
     close = pd.to_numeric(group["close_price"], errors="coerce")
-    prev_close = close.shift(1)
-    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    return tr.rolling(period, min_periods=period).mean().set_axis(group.index)
+    valid = high.gt(0) & low.gt(0) & close.gt(0)
+    valid = valid & high.ge(low)
+
+    result = pd.Series(np.nan, index=group.index, dtype=float)
+    if not valid.any():
+        return result
+
+    valid_high = high.loc[valid]
+    valid_low = low.loc[valid]
+    valid_close = close.loc[valid]
+    prev_close = valid_close.shift(1)
+    tr = pd.concat(
+        [
+            valid_high - valid_low,
+            (valid_high - prev_close).abs(),
+            (valid_low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(period, min_periods=period).mean()
+    result.loc[valid.index[valid]] = atr.to_numpy()
+    return result
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
