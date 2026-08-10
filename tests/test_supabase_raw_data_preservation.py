@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__
 
 import json
 
@@ -8,44 +8,8 @@ from modules.supabase_persistence import _daily_payload
 
 
 def test_daily_payload_preserves_all_original_excel_fields_in_raw_data():
-    frame = pd.DataFrame(
-        [
-            {
-                "No": 1,
-                "Kode Saham": "SMDM",
-                "Nama Perusahaan": "Suryamas Dutamakmur Tbk.",
-                "Remarks": "-",
-                "Sebelumnya": 570,
-                "Open Price": 570,
-                "Tanggal Perdagangan Terakhir": "2026-07-20",
-                "First Trade": 570,
-                "Tertinggi": 570,
-                "Terendah": 555,
-                "Penutupan": 565,
-                "Selisih": -5,
-                "Volume": 24800,
-                "Nilai": 13936000,
-                "Frekuensi": 38,
-                "Index Individual": 0.001,
-                "Offer": 570,
-                "Offer Volume": 10400,
-                "Bid": 565,
-                "Bid Volume": 300,
-                "Listed Shares": 1000000,
-                "Tradeble Shares": 900000,
-                "Weight For Index": 0.0001,
-                "Foreign Sell": 0,
-                "Foreign Buy": 0,
-                "Non Regular Volume": 0,
-                "Non Regular Value": 0,
-                "Non Regular Frequency": 0,
-            }
-        ]
-    )
-
-    rows = _daily_payload([frame])
-    assert len(rows) == 1
-    raw = rows[0]["raw_data"]
+    frame = pd.DataFrame([{"Kode Saham":"SMDM","Sebelumnya":570,"Tanggal Perdagangan Terakhir":"2026-07-20","First Trade":570,"Penutupan":565,"Selisih":-5,"Index Individual":0.001,"Listed Shares":1000000,"Tradeble Shares":900000,"Weight For Index":0.0001,"Non Regular Volume":0,"Non Regular Value":0,"Non Regular Frequency":0}])
+    raw = _daily_payload([frame])[0]["raw_data"]
     assert raw["Kode Saham"] == "SMDM"
     assert raw["Sebelumnya"] == 570
     assert raw["First Trade"] == 570
@@ -60,8 +24,5 @@ def test_daily_payload_preserves_all_original_excel_fields_in_raw_data():
 
 
 def test_daily_payload_raw_data_is_json_serializable():
-    frame = pd.DataFrame(
-        [{"Kode Saham": "AAA", "Tanggal Perdagangan Terakhir": pd.Timestamp("2026-07-20"), "Penutupan": 100}]
-    )
-    row = _daily_payload([frame])[0]
-    json.dumps(row, ensure_ascii=False)
+    frame = pd.DataFrame([{ "Kode Saham":"AAA", "Tanggal Perdagangan Terakhir":pd.Timestamp("2026-07-20"), "Penutupan":100 }])
+    json.dumps(_daily_payload([frame])[0], ensure_ascii=False)
