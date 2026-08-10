@@ -22,6 +22,27 @@ def test_uploader_keeps_native_mobile_selection_visible_and_supports_multiple_fi
     assert 'with st.form("daily_upload_form"' not in source
 
 
+def test_upload_result_is_persisted_across_rerun():
+    source = APP.read_text(encoding="utf-8")
+    assert '"upload_notice"' in source
+    assert "st.session_state.upload_notice =" in source
+    assert "upload_notice = st.session_state.pop(\"upload_notice\")" in source
+
+
+def test_success_path_sets_notice_before_rerun():
+    source = APP.read_text(encoding="utf-8")
+    success_marker = 'st.session_state.upload_notice = {"kind": "success"'
+    assert success_marker in source
+    assert source.index(success_marker) < source.index("st.rerun()")
+
+
+def test_existing_data_is_not_deleted_by_upload_feedback():
+    source = APP.read_text(encoding="utf-8")
+    assert "DELETE FROM" not in source
+    assert "drop_all" not in source
+    assert "reset_database" not in source
+
+
 def test_candidate_identity_columns_remain_pinned():
     source = APP.read_text(encoding="utf-8")
     assert '"stock_code": st.column_config.TextColumn("Stock", pinned=True)' in source
