@@ -21,9 +21,7 @@ MAX_FILES_PER_BATCH = 20
 _FILENAME_DATE_RE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
 
 DAILY_COLUMNS = [
-    "trade_date", "stock_code", "company_name", "open_price", "high_price",
-    "low_price", "close_price", "volume", "value", "frequency",
-    "foreign_sell", "foreign_buy",
+    "trade_date", "stock_code", "company_name", "open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy",
 ] + DAILY_ORDERBOOK_COLUMNS
 
 
@@ -39,14 +37,7 @@ def _expected_trade_date(filename: str) -> str | None:
 
 
 def _prepare_upload_frame(frame: pd.DataFrame, filename: str) -> pd.DataFrame:
-    """Normalize one file and enforce its YYYYMMDD filename date.
-
-    The old parser used ``dayfirst=True`` on ISO dates. Pandas can then
-    interpret 2026-07-06 as 2026-06-07. A daily BEI workbook has one trading
-    date, and the filename is the unambiguous YYYYMMDD source of truth. We
-    correct only the exact day/month inversion caused by that parser; any
-    other disagreement is rejected rather than guessed.
-    """
+    """Normalize one file and enforce its YYYYMMDD filename date."""
     data = normalize_dataframe(frame)
     expected = _expected_trade_date(filename)
     if expected is None:
@@ -78,6 +69,23 @@ def _prepare_upload_frame(frame: pd.DataFrame, filename: str) -> pd.DataFrame:
         f"{filename}: tanggal file {expected} tidak cocok dengan data Excel {actual}. "
         "Upload dihentikan agar histori tidak tercatat pada tanggal yang salah."
     )
+
+
+def _supabase_safe_frames(frames: list[pd.DataFrame]) -> list[pd.DataFrame]:
+    """Keep validated dates as datetime objects before the second persistence normalization.
+
+    The Supabase payload builder normalizes frames defensively. Passing an ISO string
+    back through the legacy day-first parser can re-introduce the exact day/month
+    inversion that upload validation just corrected. A real datetime value is
+    unambiguous and survives that second normalization unchanged.
+    """
+    safe: list[pd.DataFrame] = []
+    for frame in frames:
+        copy = frame.copy()
+        if "trade_date" in copy.columns:
+            copy["trade_date"] = pd.to_datetime(copy["trade_date"], format="%Y-%m-%d", errors="raise")
+        safe.append(copy)
+    return safe
 
 
 def _ensure_upload_ledger(conn: sqlite3.Connection) -> None:
@@ -137,7 +145,7 @@ def save_upload_batch(
         "upload_run_id": None,
     }
     if supabase_config()["enabled"]:
-        supabase_result = persist_upload_batch(prepared_frames, file_records)
+        supabase_result = persist_upload_batch(_supabase_safe_frames(prepared_frames), file_records)
 
     init_database()
     data = data.copy()
