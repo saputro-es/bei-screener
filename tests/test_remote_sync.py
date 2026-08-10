@@ -33,11 +33,16 @@ def test_sync_replaces_stale_local_trade_dates(monkeypatch, tmp_path):
     }]
     orderbook = []
     monkeypatch.setattr(remote_sync, "_remote_signature", lambda cfg: (1, "2026-07-31"))
-    monkeypatch.setattr(remote_sync, "_fetch_all", lambda cfg, table: daily if table == "stock_daily" else orderbook)
+    monkeypatch.setattr(
+        remote_sync,
+        "_fetch_all",
+        lambda cfg, table: daily if table == remote_sync.CANONICAL_DAILY_TABLE else orderbook,
+    )
 
     result = remote_sync.sync_local_from_supabase()
 
     assert result["synced"] is True
+    assert result["reason"] == "immutable_canonical_baseline"
     with sqlite3.connect(db_file) as conn:
         row = conn.execute("SELECT trade_date, stock_code, close_price FROM stock_daily").fetchone()
     assert row == ("2026-07-31", "AADI", 101.0)
