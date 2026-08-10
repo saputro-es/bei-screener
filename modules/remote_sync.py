@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 
 import pandas as pd
 import requests
@@ -11,6 +12,21 @@ from .supabase_persistence import _headers, config
 
 PAGE_SIZE = 1000
 TIMEOUT_SECONDS = 60
+SQLITE_BUSY_TIMEOUT_MS = 120_000
+SQLITE_RETRIES = 4
+
+
+def _connect_local() -> sqlite3.Connection:
+    """Open the local read model with a long busy timeout.
+
+    Streamlit can rerun the script while another session is finishing a local
+    reconciliation. The old code used sqlite's short default timeout during
+    init/signature checks, turning a transient lock into a fatal application
+    error. All canonical-sync connections now wait for the writer to finish.
+    """
+    conn = sqlite3.connect(DATABASE_FILE, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    return conn
 
 
 def _get_page(cfg: dict[str, str | bool], table: str, offset: int) -> list[dict]:
@@ -40,11 +56,21 @@ def _fetch_all(cfg: dict[str, str | bool], table: str) -> list[dict]:
 
 
 def _local_signature() -> tuple[int, str | None]:
-    init_database()
-    with sqlite3.connect(DATABASE_FILE) as conn:
-        count = int(conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0])
-        latest = conn.execute("SELECT MAX(trade_date) FROM stock_daily").fetchone()[0]
-    return count, latest
+    # Signature is read-only. Do not run schema migrations here because every
+    # app session would become a writer before canonical reconciliation starts.
+    if not DATABASE_FILE.exists():
+        init_database()
+    for attempt in range(SQLITE_RETRIES):
+        try:
+            with _connect_local() as conn:
+                count = int(conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0])
+                latest = conn.execute("SELECT MAX(trade_date) FROM stock_daily").fetchone()[0]
+            return count, latest
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == SQLITE_RETRIES - 1:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+    raise RuntimeError("Local SQLite signature could not be read.")
 
 
 def _remote_signature(cfg: dict[str, str | bool]) -> tuple[int, str | None]:
@@ -70,7 +96,7 @@ def _remote_signature(cfg: dict[str, str | bool]) -> tuple[int, str | None]:
     return int(total), str(latest) if latest else None
 
 
-def _replace_local_with_remote(cfg: dict[str, str | bool], remote_count: int, remote_latest: str | None) -> dict[str, object]:
+def _replace_local_once(cfg: dict[str, str | bool], remote_count: int, remote_latest: str | None) -> dict[str, object]:
     daily_rows = _fetch_all(cfg, "stock_daily")
     orderbook_rows = _fetch_all(cfg, "orderbook_snapshot")
     if len(daily_rows) != remote_count:
@@ -87,9 +113,8 @@ def _replace_local_with_remote(cfg: dict[str, str | bool], remote_count: int, re
     daily_insert_columns = daily_columns + ["raw_data"]
     orderbook_insert_columns = ORDERBOOK_COLUMNS + ["raw_data"]
 
-    with sqlite3.connect(DATABASE_FILE, timeout=60) as conn:
-        conn.execute("PRAGMA busy_timeout=60000")
-        conn.execute("BEGIN")
+    with _connect_local() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM stock_daily")
         conn.execute("DELETE FROM orderbook_snapshot")
 
@@ -125,6 +150,18 @@ def _replace_local_with_remote(cfg: dict[str, str | bool], remote_count: int, re
         "orderbook_rows": len(orderbook_rows),
         "latest_date": remote_latest,
     }
+
+
+def _replace_local_with_remote(cfg: dict[str, str | bool], remote_count: int, remote_latest: str | None) -> dict[str, object]:
+    """Replace the local read model, retrying only transient SQLite locks."""
+    for attempt in range(SQLITE_RETRIES):
+        try:
+            return _replace_local_once(cfg, remote_count, remote_latest)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == SQLITE_RETRIES - 1:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+    raise RuntimeError("Local SQLite reconciliation could not complete.")
 
 
 def sync_local_from_supabase(force: bool = False) -> dict[str, object]:
