@@ -17,13 +17,7 @@ SQLITE_RETRIES = 4
 
 
 def _connect_local() -> sqlite3.Connection:
-    """Open the local read model with a long busy timeout.
-
-    Streamlit can rerun the script while another session is finishing a local
-    reconciliation. The old code used sqlite's short default timeout during
-    init/signature checks, turning a transient lock into a fatal application
-    error. All canonical-sync connections now wait for the writer to finish.
-    """
+    """Open the local read model with a long busy timeout."""
     conn = sqlite3.connect(DATABASE_FILE, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     return conn
@@ -56,8 +50,7 @@ def _fetch_all(cfg: dict[str, str | bool], table: str) -> list[dict]:
 
 
 def _local_signature() -> tuple[int, str | None]:
-    # Signature is read-only. Do not run schema migrations here because every
-    # app session would become a writer before canonical reconciliation starts.
+    """Read the local signature without turning a normal read into a writer."""
     if not DATABASE_FILE.exists():
         init_database()
     for attempt in range(SQLITE_RETRIES):
@@ -104,7 +97,12 @@ def _replace_local_once(cfg: dict[str, str | bool], remote_count: int, remote_la
             f"Verifikasi sync gagal: remote signature {remote_count} row, tetapi fetch mendapatkan {len(daily_rows)} row."
         )
 
-    init_database()
+    # A normal sync should reuse the already-created schema. Calling init_database()
+    # here would perform migrations/index writes while another Streamlit session may
+    # be reading the same SQLite file, which is the source of the observed lock error.
+    if not DATABASE_FILE.exists():
+        init_database()
+
     daily_columns = [
         "trade_date", "stock_code", "company_name", "open_price", "high_price", "low_price",
         "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy",
@@ -165,12 +163,7 @@ def _replace_local_with_remote(cfg: dict[str, str | bool], remote_count: int, re
 
 
 def sync_local_from_supabase(force: bool = False) -> dict[str, object]:
-    """Reconcile SQLite with canonical Supabase data.
-
-    A forced sync is intended for a fresh app session so a stale local database cannot
-    masquerade as current data merely because its row count and latest date happen to
-    match. The remote dataset is fetched and verified before replacing the local read model.
-    """
+    """Reconcile SQLite with canonical Supabase data before analysis."""
     cfg = config()
     if not cfg["enabled"]:
         return {"synced": False, "reason": "supabase_disabled"}
