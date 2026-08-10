@@ -10,9 +10,9 @@ LEVELS = range(1, 6)
 def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
     """Summarize the latest usable five-level orderbook snapshot per stock.
 
-    Price levels and volume levels are tracked separately. A price-only snapshot
-    is valid for spread/best-price diagnostics, but it must never be treated as
-    a depth/pressure snapshot when either bid or offer volumes are missing.
+    BEI exports can encode an unavailable quote level as numeric zero. Zero is
+    not a valid market price, so it is treated as unavailable for analytics;
+    the raw source remains untouched in storage.
     """
     output_columns = [
         "stock_code", "snapshot_date", "snapshot_time", "best_bid", "best_ask", "spread", "spread_pct",
@@ -41,6 +41,18 @@ def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
                     data[col] = np.nan
                 data[col] = pd.to_numeric(data[col], errors="coerce")
 
+                # In the BEI snapshot format, price=0 means no quote. A volume
+                # without a positive quote is therefore not a usable book level.
+                if kind == "price":
+                    data.loc[data[col] <= 0, col] = np.nan
+
+    for side in ("bid", "ask"):
+        for level in LEVELS:
+            price_col = f"{side}_price_{level}"
+            volume_col = f"{side}_volume_{level}"
+            data.loc[data[price_col].isna(), volume_col] = np.nan
+            data.loc[data[volume_col] < 0, volume_col] = np.nan
+
     price_columns = [f"{side}_price_{level}" for level in LEVELS for side in ("bid", "ask")]
     data = data[data[price_columns].notna().any(axis=1)].copy()
     if data.empty:
@@ -51,8 +63,6 @@ def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
 
     bid_volume_cols = [f"bid_volume_{n}" for n in LEVELS]
     ask_volume_cols = [f"ask_volume_{n}" for n in LEVELS]
-    bid_price_cols = [f"bid_price_{n}" for n in LEVELS]
-    ask_price_cols = [f"ask_price_{n}" for n in LEVELS]
 
     latest["price_levels_available"] = latest[price_columns].notna().sum(axis=1)
     latest["bid_volume_levels"] = latest[bid_volume_cols].notna().sum(axis=1)
@@ -67,8 +77,7 @@ def summarize_orderbook(df: pd.DataFrame) -> pd.DataFrame:
     latest["bid_depth_5"] = bid_depth
     latest["ask_depth_5"] = ask_depth
 
-    # Pressure/imbalance is valid only when BOTH sides contain volume data.
-    # Missing offer volume must never be interpreted as zero offer volume.
+    # Pressure/imbalance is valid only when BOTH sides contain usable volume data.
     both_sides_volume = (
         latest["bid_volume_levels"].gt(0)
         & latest["ask_volume_levels"].gt(0)
