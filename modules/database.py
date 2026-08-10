@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Iterable
@@ -75,8 +76,18 @@ def _normalise_codes(data: pd.DataFrame, column: str) -> None:
     data.loc[data[column].isin(["", "NAN", "NONE", "<NA>"]), column] = pd.NA
 
 
+_BEI_MONTHS = {
+    "jan": 1, "januari": 1, "feb": 2, "februari": 2, "mar": 3, "maret": 3,
+    "apr": 4, "april": 4, "mei": 5, "may": 5, "jun": 6, "juni": 6,
+    "jul": 7, "juli": 7, "agt": 8, "ags": 8, "agu": 8, "aug": 8, "agustus": 8,
+    "sep": 9, "sept": 9, "september": 9, "okt": 10, "oct": 10, "oktober": 10,
+    "nov": 11, "november": 11, "des": 12, "dec": 12, "desember": 12,
+}
+_BEI_MONTH_DATE_RE = re.compile(r"^(\d{1,2})[\s/.-]+([A-Za-zÀ-ÿ]+)[\s/.-]+(\d{4})$")
+
+
 def _parse_one_trade_date(value) -> pd.Timestamp:
-    """Parse one BEI/Excel date without using the filename as a date source."""
+    """Parse BEI/Excel dates without using the filename as a date source."""
     if value is None or pd.isna(value):
         return pd.NaT
     if isinstance(value, pd.Timestamp):
@@ -93,7 +104,6 @@ def _parse_one_trade_date(value) -> pd.Timestamp:
                 parsed = pd.to_datetime(integer, unit="D", origin="1899-12-30", errors="coerce")
                 if pd.notna(parsed) and pd.Timestamp("1990-01-01") <= parsed <= pd.Timestamp("2099-12-31"):
                     return parsed.normalize()
-
     text = str(value).strip()
     if not text:
         return pd.NaT
@@ -103,11 +113,19 @@ def _parse_one_trade_date(value) -> pd.Timestamp:
         return pd.to_datetime(text, format="%Y%m%d", errors="coerce")
     if len(text) >= 10 and text[0:4].isdigit() and text[4] == "-" and text[7] == "-":
         return pd.to_datetime(text[:10], format="%Y-%m-%d", errors="coerce")
+    match = _BEI_MONTH_DATE_RE.fullmatch(text)
+    if match:
+        day, month_name, year = match.groups()
+        month = _BEI_MONTHS.get(month_name.lower())
+        if month is not None:
+            try:
+                return pd.Timestamp(year=int(year), month=month, day=int(day))
+            except ValueError:
+                return pd.NaT
     return pd.to_datetime(text, errors="coerce", dayfirst=True).normalize()
 
 
 def _parse_trade_dates(values: pd.Series) -> pd.Series:
-    """Parse BEI trade dates while preserving invalid values as NaT."""
     return values.map(_parse_one_trade_date).astype("datetime64[ns]")
 
 
