@@ -33,7 +33,7 @@ ORDERBOOK_ALIASES = {
     "bid_price_1": ["Bid Price 1", "Bid1 Price", "Bid 1", "Best Bid", "Bid", "Harga Bid 1"],
     "bid_volume_1": ["Bid Volume 1", "Bid1 Volume", "Bid 1 Volume", "Bid Volume", "Best Bid Volume", "Volume Bid 1"],
     "ask_price_1": ["Offer Price 1", "Ask Price 1", "Offer1 Price", "Ask1 Price", "Offer 1", "Best Offer", "Offer", "Ask", "Harga Offer 1"],
-    "ask_volume_1": ["Offer Volume", "Offer Volume 1", "Ask Volume", "Ask Volume 1", "Offer1 Volume", "Ask1 Volume", "Offer 1 Volume", "Best Offer Volume", "Volume Offer", "Volume Offer 1"],
+    "ask_volume_1": ["Offer Volume", "Offer Volume 1", "Ask Volume", "Ask Volume 1", "Offer1 Volume", "Ask1 Volume", "Best Offer Volume", "Volume Offer", "Volume Offer 1"],
 }
 for side, labels in (("bid", ("Bid",)), ("ask", ("Ask", "Offer"))):
     for level in range(2, 6):
@@ -75,26 +75,40 @@ def _normalise_codes(data: pd.DataFrame, column: str) -> None:
     data.loc[data[column].isin(["", "NAN", "NONE", "<NA>"]), column] = pd.NA
 
 
+def _parse_one_trade_date(value) -> pd.Timestamp:
+    """Parse one BEI/Excel date without using the filename as a date source."""
+    if value is None or pd.isna(value):
+        return pd.NaT
+    if isinstance(value, pd.Timestamp):
+        return value.normalize()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if pd.isna(number):
+            return pd.NaT
+        if number.is_integer():
+            integer = int(number)
+            if 19000101 <= integer <= 29991231:
+                return pd.to_datetime(str(integer), format="%Y%m%d", errors="coerce")
+            if 30000 <= integer <= 100000:
+                parsed = pd.to_datetime(integer, unit="D", origin="1899-12-30", errors="coerce")
+                if pd.notna(parsed) and pd.Timestamp("1990-01-01") <= parsed <= pd.Timestamp("2099-12-31"):
+                    return parsed.normalize()
+
+    text = str(value).strip()
+    if not text:
+        return pd.NaT
+    if text.endswith(".0") and text[:-2].isdigit():
+        return _parse_one_trade_date(float(text))
+    if len(text) == 8 and text.isdigit():
+        return pd.to_datetime(text, format="%Y%m%d", errors="coerce")
+    if len(text) >= 10 and text[0:4].isdigit() and text[4] == "-" and text[7] == "-":
+        return pd.to_datetime(text[:10], format="%Y-%m-%d", errors="coerce")
+    return pd.to_datetime(text, errors="coerce", dayfirst=True).normalize()
+
+
 def _parse_trade_dates(values: pd.Series) -> pd.Series:
-    """Parse dates without guessing the meaning of an ISO date string."""
-    parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
-    for index, value in values.items():
-        if pd.isna(value):
-            continue
-        if isinstance(value, pd.Timestamp):
-            parsed.loc[index] = value.normalize()
-            continue
-        text = str(value).strip()
-        if not text:
-            continue
-        if len(text) == 8 and text.isdigit():
-            parsed.loc[index] = pd.to_datetime(text, format="%Y%m%d", errors="coerce")
-            continue
-        if len(text) >= 10 and text[0:4].isdigit() and text[4] == "-" and text[7] == "-":
-            parsed.loc[index] = pd.to_datetime(text[:10], format="%Y-%m-%d", errors="coerce")
-            continue
-        parsed.loc[index] = pd.to_datetime(text, errors="coerce", dayfirst=True)
-    return parsed.dt.normalize()
+    """Parse BEI trade dates while preserving invalid values as NaT."""
+    return values.map(_parse_one_trade_date).astype("datetime64[ns]")
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -261,16 +275,14 @@ def load_orderbook(stock_code: str | None = None, latest_only: bool = False) -> 
 def database_info() -> dict[str, int]:
     init_database()
     with sqlite3.connect(DATABASE_FILE) as conn:
-        total_rows = conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0]
-        total_stocks = conn.execute("SELECT COUNT(DISTINCT stock_code) FROM stock_daily").fetchone()[0]
-        total_days = conn.execute("SELECT COUNT(DISTINCT trade_date) FROM stock_daily").fetchone()[0]
-        orderbook_rows = conn.execute("SELECT COUNT(*) FROM stock_daily WHERE bid_price_1 IS NOT NULL OR ask_price_1 IS NOT NULL").fetchone()[0]
+        total_rows = int(conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0])
+        total_stocks = int(conn.execute("SELECT COUNT(DISTINCT stock_code) FROM stock_daily").fetchone()[0])
+        total_days = int(conn.execute("SELECT COUNT(DISTINCT trade_date) FROM stock_daily").fetchone()[0])
+        orderbook_rows = int(conn.execute("SELECT COUNT(*) FROM orderbook_snapshot").fetchone()[0])
     return {"total_rows": total_rows, "total_stocks": total_stocks, "total_days": total_days, "orderbook_rows": orderbook_rows}
 
 
-def clear_database() -> None:
-    init_database()
-    with sqlite3.connect(DATABASE_FILE) as conn:
-        conn.execute("DELETE FROM stock_daily")
-        conn.execute("DELETE FROM orderbook_snapshot")
-        conn.commit()
+def load_remote_json_rows(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    return normalize_dataframe(pd.DataFrame(rows))
