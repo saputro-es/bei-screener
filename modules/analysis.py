@@ -64,21 +64,19 @@ def accumulation_horizons(df: pd.DataFrame, horizons: tuple[int, ...] = HORIZONS
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     for col in ("foreign_buy", "foreign_sell"):
         if col not in data:
-            data[col] = 0.0
-        data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0.0)
+            data[col] = np.nan
+        data[col] = pd.to_numeric(data[col], errors="coerce")
     data = data.dropna(subset=["stock_code", "trade_date"]).sort_values(["stock_code", "trade_date"])
 
     rows: list[dict] = []
     for code, group in data.groupby("stock_code"):
         group = group.drop_duplicates("trade_date", keep="last")
         row: dict = {"stock_code": code, "latest_date": group["trade_date"].max()}
-        available_days = len(group)
         for days in horizons:
             recent = group.tail(days)
             n = len(recent)
             row[f"days_available_{days}d"] = n
-            if n < days:
-                # Never present a partial horizon as a valid Net Buy percentage.
+            if n < days or recent[["foreign_buy", "foreign_sell"]].isna().any().any():
                 row[f"net_buy_{days}d"] = np.nan
                 row[f"net_buy_pct_{days}d"] = np.nan
                 continue
@@ -92,7 +90,6 @@ def accumulation_horizons(df: pd.DataFrame, horizons: tuple[int, ...] = HORIZONS
 
 
 def three_day_accumulation(df: pd.DataFrame) -> pd.DataFrame:
-    """Backward-compatible 3D view; the primary engine now uses all seven horizons."""
     data = accumulation_horizons(df, (3,))
     if data.empty:
         return data
@@ -125,7 +122,6 @@ def _horizon_strength(row: pd.Series) -> tuple[float, int, int]:
 
 
 def _technical_readiness(history: pd.DataFrame) -> tuple[int, str]:
-    """Report how much price history exists without fabricating indicators."""
     available = int(history["trade_date"].nunique()) if "trade_date" in history else 0
     requirements = {"RSI14": 14, "SMA20": 20, "SMA50": 50, "SMA200": 200, "Vol20": 20, "ATR14": 14}
     missing = [f"{name} {min(available, need)}/{need}" for name, need in requirements.items() if available < need]
@@ -218,9 +214,11 @@ def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd
         quality = "⚠️ Perlu konfirmasi harga/volume"
 
     target_low = target_high = stop = np.nan
-    if np.isfinite(close):
-        base_atr = atr if np.isfinite(atr) and atr > 0 else close * 0.03
-        target_low, target_high, stop = close + base_atr, close + 2 * base_atr, close - 1.2 * base_atr
+    if np.isfinite(close) and np.isfinite(atr) and atr > 0:
+        target_low, target_high, stop = close + atr, close + 2 * atr, close - 1.2 * atr
+        reasons.append("target/stop dihitung dari ATR14 aktual")
+    else:
+        reasons.append("target/stop kosong: ATR14 aktual belum tersedia")
 
     return {
         "signal": signal, "quality": quality, "score": round(score, 2), "multi_horizon_score": round(score - ob_score, 2),
@@ -247,7 +245,12 @@ def screen(df: pd.DataFrame, threshold: float = 65.0, orderbook: pd.DataFrame | 
         latest_row = latest[latest["stock_code"] == code]
         if not latest_row.empty:
             lr = latest_row.iloc[0]
-            row.update({"company_name": lr.get("company_name"), "close_price": lr.get("close_price"), "volume": lr.get("volume")})
+            row.update({
+                "company_name": lr.get("company_name"),
+                "close_price": lr.get("close_price"),
+                "volume": lr.get("volume"),
+                "as_of_date": lr.get("trade_date"),
+            })
         row.update(result)
         rows.append(row)
     result = pd.DataFrame(rows)
@@ -255,4 +258,5 @@ def screen(df: pd.DataFrame, threshold: float = 65.0, orderbook: pd.DataFrame | 
         return result
     result = result[result["days_available_3d"] >= 3]
     result = result[result["net_buy_pct_3d"] > threshold].copy()
+    result = result[result["close_price"].notna()].copy()
     return result.sort_values(["score", "net_buy_pct_3d"], ascending=[False, False]).reset_index(drop=True)

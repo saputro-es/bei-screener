@@ -10,6 +10,7 @@ from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, 
 from modules.historical_repair import repair_frames
 from modules.orderbook import summarize_orderbook
 from modules.persistence import backup_database, config as persistence_config, restore_if_needed, status as persistence_status
+from modules.remote_sync import sync_local_from_supabase
 from modules.upload import MAX_FILES_PER_BATCH, existing_hashes, save_upload_batch, sha256_bytes
 
 st.set_page_config(page_title="BEI Screener V4", page_icon="📈", layout="wide")
@@ -24,8 +25,17 @@ def _fmt(value, decimals: int = 0) -> str:
         return "-"
 
 
+def _format_trade_date_display(data: pd.DataFrame) -> pd.DataFrame:
+    """Return a display copy whose trade dates always use unambiguous ISO YYYY-MM-DD."""
+    if data is None or data.empty or "trade_date" not in data.columns:
+        return data.copy() if data is not None else pd.DataFrame()
+    display = data.copy()
+    parsed = pd.to_datetime(display["trade_date"], errors="coerce", format="%Y-%m-%d")
+    display["trade_date"] = parsed.dt.strftime("%Y-%m-%d")
+    return display
+
+
 def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
-    """Build the latest five-level orderbook snapshots from the canonical BEI dataset."""
     required = {"trade_date", "stock_code", *DAILY_ORDERBOOK_COLUMNS}
     if data.empty or not required.issubset(data.columns):
         return pd.DataFrame()
@@ -38,7 +48,6 @@ def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _safe_orderbook_table(orderbook: pd.DataFrame) -> pd.DataFrame:
-    """Guarantee a stable display schema even when Streamlit serves mixed/stale module state."""
     if orderbook is None or orderbook.empty:
         return pd.DataFrame()
     table = orderbook.copy()
@@ -60,7 +69,6 @@ def _safe_orderbook_table(orderbook: pd.DataFrame) -> pd.DataFrame:
 
 
 def _orderbook_sort_key(table: pd.DataFrame) -> pd.DataFrame:
-    """Sort without ever raising KeyError if a deployment has an older schema."""
     table = _safe_orderbook_table(table)
     if table.empty:
         return table
@@ -77,6 +85,30 @@ try:
     restore_result = restore_if_needed()
 except Exception as exc:
     restore_result = {"restored": False, "error": str(exc)}
+
+# Supabase is the canonical analytical dataset. Check it once per browser session so
+# an old restored SQLite file cannot silently feed stale prices/indicators into the UI.
+if not st.session_state.get("canonical_sync_checked"):
+    try:
+        sync_result = sync_local_from_supabase(force=True)
+    except Exception as exc:
+        sync_result = {"synced": False, "reason": "sync_error", "error": str(exc)}
+    st.session_state.canonical_sync_checked = True
+    st.session_state.canonical_sync_result = sync_result
+else:
+    sync_result = st.session_state.get("canonical_sync_result", {"synced": False, "reason": "already_checked"})
+
+if sync_result.get("synced"):
+    st.info(
+        f"🔄 Histori lokal diselaraskan dengan sumber kanonik: "
+        f"{int(sync_result.get('rows', 0)):,} baris | tanggal terakhir {sync_result.get('latest_date', '-')}"
+    )
+elif sync_result.get("reason") == "sync_error":
+    st.error(
+        "⚠️ Sumber kanonik tidak dapat diverifikasi. Analisis baru dikunci agar aplikasi tidak menampilkan angka dari data lokal yang mungkin stale. "
+        f"Detail: {sync_result.get('error', '-')}"
+    )
+    st.stop()
 
 info = database_info()
 persistence_cfg = persistence_config()
@@ -102,8 +134,6 @@ with st.sidebar:
     else:
         st.info("Backup permanen belum dibuat. Upload pertama akan membuatnya.")
 
-# Keep the last upload result visible after the deliberate Streamlit rerun.
-# This is UI/session state only; it does not alter the persisted dataset.
 if "upload_notice" in st.session_state:
     upload_notice = st.session_state.pop("upload_notice")
     if upload_notice["kind"] == "success":
@@ -127,9 +157,6 @@ if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
 upload_key = f"daily_upload_{st.session_state.upload_generation}"
 
-# Keep the native Streamlit uploader outside st.form. Some mobile browsers
-# fail to repaint the selected-file list when the uploader is nested in a
-# form/container. The separate button remains an explicit commit step.
 files = st.file_uploader(
     "Pilih satu atau beberapa file Ringkasan Saham BEI",
     type=["xlsx", "xls"],
@@ -142,18 +169,12 @@ files = st.file_uploader(
 if files:
     st.success(f"📎 {len(files)} file siap diproses: " + ", ".join(file.name for file in files))
 
-submitted = st.button(
-    "🚀 Proses Upload",
-    type="primary",
-    use_container_width=True,
-    disabled=not persistence_cfg["enabled"] or not files,
-)
+submitted = st.button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"] or not files)
 
 if submitted:
     if not files:
         st.warning("Pilih minimal satu file Excel terlebih dahulu.")
         st.stop()
-
     if len(files) > MAX_FILES_PER_BATCH:
         st.error(f"❌ Terlalu banyak file: {len(files)}. Maksimal {MAX_FILES_PER_BATCH} file per batch.")
         st.stop()
@@ -161,7 +182,6 @@ if submitted:
     file_entries = [(file, sha256_bytes(file.getvalue())) for file in files]
     already_uploaded = existing_hashes(sha for _, sha in file_entries)
     new_entries = [(file, file_sha) for file, file_sha in file_entries if file_sha not in already_uploaded]
-
     if already_uploaded:
         st.info(f"♻️ {len(already_uploaded)} file sudah ada. File akan diverifikasi dan diperbaiki hanya pada field historis yang kosong; ledger dan jumlah upload tidak bertambah.")
 
@@ -180,18 +200,8 @@ if submitted:
             l1_complete = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
             price_levels = int(normalized[DAILY_ORDERBOOK_COLUMNS].notna().sum(axis=1).gt(0).sum())
             volume_levels = int(normalized[[c for c in DAILY_ORDERBOOK_COLUMNS if "volume" in c]].notna().sum(axis=1).gt(0).sum())
-            file_records.append({
-                "sha256": file_sha,
-                "filename": file.name,
-                "size_bytes": len(file.getvalue()),
-                "rows_read": len(normalized),
-                "rows_saved": len(normalized),
-            })
-            st.success(
-                f"✅ {file.name}: {len(normalized):,} baris | "
-                f"L1 price+volume lengkap: {l1_complete:,} | "
-                f"snapshot price level: {price_levels:,} | snapshot volume: {volume_levels:,}"
-            )
+            file_records.append({"sha256": file_sha, "filename": file.name, "size_bytes": len(file.getvalue()), "rows_read": len(normalized), "rows_saved": len(normalized)})
+            st.success(f"✅ {file.name}: {len(normalized):,} baris | L1 price+volume lengkap: {l1_complete:,} | snapshot price level: {price_levels:,} | snapshot volume: {volume_levels:,}")
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
         finally:
@@ -206,18 +216,16 @@ if submitted:
                     backup_result = backup_database()
                     message = (
                         f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki "
-                        f"dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. "
-                        f"Ledger tidak bertambah; backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
+                        f"dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. Ledger tidak bertambah; "
+                        f"backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
                     )
                     st.session_state.upload_notice = {"kind": "success", "message": message}
                 else:
                     result = save_upload_batch(all_frames, file_records)
                     backup_result = backup_database()
                     message = (
-                        f"💾 Selesai dan aman: {result['files_saved']} file | "
-                        f"{result['rows_saved']:,} baris unik disimpan/di-update | "
-                        f"{result['orderbook_rows']:,} snapshot orderbook | "
-                        f"backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
+                        f"💾 Selesai dan aman: {result['files_saved']} file | {result['rows_saved']:,} baris unik disimpan/di-update | "
+                        f"{result['orderbook_rows']:,} snapshot orderbook | backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
                     )
                     st.session_state.upload_notice = {"kind": "success", "message": message}
             progress.empty()
@@ -225,11 +233,7 @@ if submitted:
             st.rerun()
         except Exception as exc:
             progress.empty()
-            st.session_state.upload_notice = {
-                "kind": "error",
-                "message": "❌ Batch belum dianggap selesai karena persistence/backup gagal. "
-                f"Data tidak akan kami anggap aman sebelum proses berhasil: {exc}",
-            }
+            st.session_state.upload_notice = {"kind": "error", "message": "❌ Batch belum dianggap selesai karena persistence/backup gagal. Data tidak akan kami anggap aman sebelum proses berhasil: " + str(exc)}
             st.rerun()
 
 st.divider()
@@ -251,16 +255,13 @@ Upload **≥200 hari bursa** agar horizon 200D aktif. Jika file BEI menyertakan 
     st.stop()
 
 st.subheader("🗄️ Histori SQLite")
-latest_date = data["trade_date"].max()
-st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris | Snapshot Bid/Offer: **{len(orderbook):,} saham**")
+latest_date = pd.to_datetime(data["trade_date"], errors="coerce", format="%Y-%m-%d").max()
+latest_date_display = latest_date.strftime("%Y-%m-%d") if pd.notna(latest_date) else "-"
+st.write(f"Data terakhir: **{latest_date_display}** | {len(data):,} baris | Snapshot Bid/Offer: **{len(orderbook):,} saham**")
 
 if len(data["trade_date"].unique()) < 200:
     days_available = int(data["trade_date"].nunique())
-    st.warning(
-        f"⏳ Histori saat ini baru **{days_available}/200 hari bursa**. "
-        "RSI14/SMA20/SMA50/SMA200/Volume20/ATR14 yang belum memenuhi window akan sengaja tetap kosong — aplikasi tidak mengarang angka. "
-        "Upload histori berikutnya untuk mengaktifkan teknikal penuh."
-    )
+    st.warning(f"⏳ Histori saat ini baru **{days_available}/200 hari bursa**. RSI14/SMA20/SMA50/SMA200/Volume20/ATR14 yang belum memenuhi window akan sengaja tetap kosong — aplikasi tidak mengarang angka. Upload histori berikutnya untuk mengaktifkan teknikal penuh.")
 
 screened = screen(data, threshold=threshold, orderbook=orderbook)
 st.subheader(f"🔥 Kandidat: Net Buy 3D > {threshold:.0f}% + Multi-Horizon 3D–200D")
@@ -282,58 +283,43 @@ else:
     display["Target Low"] = display["target_low"].round(0)
     display["Target High"] = display["target_high"].round(0)
     display["Stop Loss"] = display["stop_loss"].round(0)
-
-    cols = ["stock_code", "company_name", "close_price"] + [f"NB {d}D %" for d in HORIZONS] + [
-        "signal", "quality", "Score", "technical_status", "RSI14", "SMA20", "SMA50", "SMA200", "Vol Ratio",
-        "OB Pressure %", "OB Imbalance %", "orderbook_signal", "orderbook_status",
-        "Target Low", "Target High", "Stop Loss",
-    ]
+    cols = ["stock_code", "company_name", "as_of_date", "close_price"] + [f"NB {d}D %" for d in HORIZONS] + ["signal", "quality", "Score", "technical_status", "RSI14", "SMA20", "SMA50", "SMA200", "Vol Ratio", "OB Pressure %", "OB Imbalance %", "orderbook_signal", "orderbook_status", "Target Low", "Target High", "Stop Loss"]
     cols = [c for c in cols if c in display.columns]
-
     candidate_config = {
         "stock_code": st.column_config.TextColumn("Stock", pinned=True),
         "company_name": st.column_config.TextColumn("Company", pinned=True),
+        "as_of_date": st.column_config.TextColumn("Data per", help="Tanggal perdagangan terakhir yang menjadi sumber Close dan indikator kandidat."),
         "close_price": st.column_config.NumberColumn("Close", format="%.0f"),
     }
-    st.dataframe(
-        display[cols],
-        use_container_width=True,
-        hide_index=True,
-        column_config={k: v for k, v in candidate_config.items() if k in cols},
-    )
+    st.dataframe(display[cols], use_container_width=True, hide_index=True, column_config={k: v for k, v in candidate_config.items() if k in cols})
 
     st.subheader("🎯 Detail kandidat")
     for _, row in screened.head(100).iterrows():
         with st.expander(f"{row['stock_code']} — {row.get('signal', '-')} | 3D {row.get('net_buy_pct_3d', float('nan')):.2f}% | Score {row.get('score', 0):.2f}"):
+            st.caption(f"**Data per: {pd.Timestamp(row.get('as_of_date')).strftime('%Y-%m-%d') if pd.notna(row.get('as_of_date')) else '-'}** — Close dan seluruh indikator di bawah berasal dari histori sampai tanggal ini.")
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Close", _fmt(row.get("close_price")))
             c2.metric("RSI14", _fmt(row.get("rsi14"), 1))
             c3.metric("SMA200", _fmt(row.get("sma200")))
             c4.metric("Vol Ratio", _fmt(row.get("volume_ratio"), 2))
             c5.metric("OB Pressure", _fmt(row.get("book_pressure_pct"), 1))
-
             st.info(f"**Technical readiness:** {row.get('technical_status', '-')}")
-
             horizon_cols = st.columns(len(HORIZONS))
             for col, days in zip(horizon_cols, HORIZONS):
                 value = row.get(f"net_buy_pct_{days}d")
                 available = row.get(f"days_available_{days}d", 0)
                 col.metric(f"NB {days}D", _fmt(value, 1), f"{int(available)}/{days} hari" if pd.notna(value) else "-")
-
             st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
-            st.write(
-                f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | "
-                f"Status: {row.get('orderbook_status', '-')} | Pressure {_fmt(row.get('book_pressure_pct'), 2)}% | "
-                f"Imbalance {_fmt(row.get('orderbook_imbalance_pct'), 2)}%"
-            )
+            st.write(f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Status: {row.get('orderbook_status', '-')} | Pressure {_fmt(row.get('book_pressure_pct'), 2)}% | Imbalance {_fmt(row.get('orderbook_imbalance_pct'), 2)}%")
             st.write(f"**Alasan:** {row.get('reason', '-')}")
-            st.write(f"**Target 1 minggu (indikatif):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
+            st.write(f"**Target 1 minggu (indikatif, berbasis ATR14 aktual):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
 
 st.divider()
 st.subheader("🔎 Detail histori harga")
 selected = st.selectbox("Pilih saham", sorted(data["stock_code"].dropna().unique()))
 stock_history = data[data["stock_code"] == selected].sort_values("trade_date", ascending=False)
-st.dataframe(stock_history, use_container_width=True, hide_index=True)
+stock_history = _format_trade_date_display(stock_history)
+st.dataframe(stock_history, use_container_width=True, hide_index=True, column_config={"trade_date": st.column_config.TextColumn("trade_date", help="Format tanggal standar: YYYY-MM-DD")})
 
 st.subheader("📖 Bid/Offer terbaru dari file BEI")
 if orderbook.empty:
@@ -351,9 +337,4 @@ else:
         "book_pressure_pct": st.column_config.NumberColumn("Bid Pressure %", format="%.2f%%"),
         "orderbook_imbalance_pct": st.column_config.NumberColumn("Imbalance %", format="%.2f%%"),
     }
-    st.dataframe(
-        safe_orderbook,
-        use_container_width=True,
-        hide_index=True,
-        column_config={k: v for k, v in orderbook_config.items() if k in safe_orderbook.columns},
-    )
+    st.dataframe(safe_orderbook, use_container_width=True, hide_index=True, column_config={k: v for k, v in orderbook_config.items() if k in safe_orderbook.columns})
