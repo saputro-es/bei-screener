@@ -51,21 +51,35 @@ def test_existing_hashes(monkeypatch, tmp_path):
     assert upload.existing_hashes(["known", "unknown"]) == {"known"}
 
 
-def test_filename_date_prevents_iso_day_month_inversion(monkeypatch, tmp_path):
+def test_iso_date_is_never_day_month_swapped():
+    frame = pd.DataFrame({"trade_date": ["2026-06-07", "2026-07-08"], "stock_code": ["A", "B"]})
+    normalized = database.normalize_dataframe(frame)
+    assert normalized["trade_date"].tolist() == ["2026-06-07", "2026-07-08"]
+
+
+def test_filename_date_accepts_exact_iso_date(monkeypatch, tmp_path):
     _use_temp_db(monkeypatch, tmp_path)
-    frame = pd.DataFrame({"trade_date": ["2026-06-07"], "stock_code": ["TEST"], "close_price": [100]})
-    result = upload.save_upload_batch([frame], [{"sha256": "date-6", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}])
+    frame = pd.DataFrame({"trade_date": ["2026-07-06"], "stock_code": ["TEST"], "close_price": [100]})
+    result = upload.save_upload_batch([frame], [{"sha256": "date-exact", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}])
     assert result["rows_saved"] == 1
     with sqlite3.connect(upload.DATABASE_FILE) as conn:
         assert conn.execute("SELECT trade_date FROM stock_daily").fetchone()[0] == "2026-07-06"
 
 
-def test_filename_date_prevents_august_instead_of_july(monkeypatch, tmp_path):
+def test_filename_date_rejects_swapped_iso_date(monkeypatch, tmp_path):
     _use_temp_db(monkeypatch, tmp_path)
-    frame = pd.DataFrame({"trade_date": ["2026-08-07"], "stock_code": ["TEST"], "close_price": [100]})
-    upload.save_upload_batch([frame], [{"sha256": "date-8", "filename": "Ringkasan Saham-20260708.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}])
+    frame = pd.DataFrame({"trade_date": ["2026-06-07"], "stock_code": ["TEST"], "close_price": [100]})
+    with pytest.raises(ValueError, match="tidak cocok"):
+        upload.save_upload_batch([frame], [{"sha256": "date-swapped", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}])
     with sqlite3.connect(upload.DATABASE_FILE) as conn:
-        assert conn.execute("SELECT trade_date FROM stock_daily").fetchone()[0] == "2026-07-08"
+        assert conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0] == 0
+
+
+def test_filename_date_rejects_ambiguous_slash_date(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    frame = pd.DataFrame({"trade_date": ["07/06/2026"], "stock_code": ["TEST"], "close_price": [100]})
+    with pytest.raises(ValueError, match="tidak cocok"):
+        upload.save_upload_batch([frame], [{"sha256": "date-ambiguous", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}])
 
 
 def test_filename_date_rejects_unrelated_mismatch(monkeypatch, tmp_path):
