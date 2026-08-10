@@ -75,17 +75,9 @@ def _row_to_json(row: pd.Series) -> dict:
 def _post_rpc(payload: dict, path: str = RPC_PATH) -> dict:
     cfg = config()
     if not cfg["enabled"]:
-        raise RuntimeError(
-            "Supabase historical persistence belum dikonfigurasi. "
-            "Tambahkan SUPABASE_SECRET_KEY ke Streamlit Secrets."
-        )
+        raise RuntimeError("Supabase historical persistence belum dikonfigurasi. Tambahkan SUPABASE_SECRET_KEY ke Streamlit Secrets.")
     try:
-        response = requests.post(
-            f"{cfg['url']}{path}",
-            headers=_headers(str(cfg["key"])),
-            json=payload,
-            timeout=TIMEOUT_SECONDS,
-        )
+        response = requests.post(f"{cfg['url']}{path}", headers=_headers(str(cfg["key"])), json=payload, timeout=TIMEOUT_SECONDS)
     except requests.RequestException as exc:
         raise RuntimeError(f"Supabase RPC network error: {exc}") from exc
     if response.status_code >= 400:
@@ -107,12 +99,7 @@ def _existing_remote_hashes(hashes: list[str]) -> set[str]:
     values = sorted({str(value).lower() for value in hashes if value})
     if not cfg["enabled"] or not values:
         return set()
-    response = requests.get(
-        f"{cfg['url']}/rest/v1/upload_ledger",
-        headers=_headers(str(cfg["key"])),
-        params={"select": "sha256", "sha256": f"in.({','.join(values)})"},
-        timeout=30,
-    )
+    response = requests.get(f"{cfg['url']}/rest/v1/upload_ledger", headers=_headers(str(cfg["key"])), params={"select": "sha256", "sha256": f"in.({','.join(values)})"}, timeout=30)
     if response.status_code >= 400:
         raise RuntimeError(f"Supabase upload ledger {response.status_code}: {response.text[:2000]}")
     body = response.json()
@@ -121,23 +108,12 @@ def _existing_remote_hashes(hashes: list[str]) -> set[str]:
 
 def status() -> dict[str, object]:
     cfg = config()
-    result: dict[str, object] = {
-        "enabled": bool(cfg["enabled"]),
-        "configured": bool(cfg["enabled"]),
-        "url": cfg["url"],
-        "reachable": False,
-        "historical_rows": 0,
-    }
+    result: dict[str, object] = {"enabled": bool(cfg["enabled"]), "configured": bool(cfg["enabled"]), "url": cfg["url"], "reachable": False, "historical_rows": 0}
     if not cfg["enabled"]:
         result["reason"] = "secret_missing"
         return result
     try:
-        response = requests.get(
-            f"{cfg['url']}/rest/v1/stock_daily",
-            headers={**_headers(str(cfg["key"])), "Prefer": "count=exact"},
-            params={"select": "id", "limit": 1},
-            timeout=30,
-        )
+        response = requests.get(f"{cfg['url']}/rest/v1/stock_daily", headers={**_headers(str(cfg["key"])), "Prefer": "count=exact"}, params={"select": "id", "limit": 1}, timeout=30)
         if response.status_code >= 400:
             raise RuntimeError(f"Supabase {response.status_code}: {response.text[:1000]}")
         content_range = response.headers.get("Content-Range", "")
@@ -166,14 +142,11 @@ def _daily_payload(frames: Iterable[pd.DataFrame]) -> list[dict]:
         return []
     data = data.dropna(subset=["trade_date", "stock_code"]).copy()
     data = data.drop_duplicates(subset=["trade_date", "stock_code"], keep="last")
-    columns = [
-        "trade_date", "stock_code", "company_name", "open_price", "high_price", "low_price",
-        "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy",
-        *DAILY_ORDERBOOK_COLUMNS,
-    ]
+    columns = ["trade_date", "stock_code", "company_name", "open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy", *DAILY_ORDERBOOK_COLUMNS]
     rows: list[dict] = []
-    for _, row in data[columns].iterrows():
-        item = _row_to_json(row)
+    for index in data.index:
+        row = data.loc[index]
+        item = _row_to_json(row[columns])
         item["raw_data"] = _row_to_json(row)
         rows.append(item)
     return rows
@@ -185,12 +158,7 @@ def _orderbook_payload(daily_rows: list[dict]) -> list[dict]:
         levels = {column: daily.get(column) for column in DAILY_ORDERBOOK_COLUMNS}
         if not any(value is not None for value in levels.values()):
             continue
-        item = {
-            "snapshot_date": daily.get("trade_date"),
-            "snapshot_time": "00:00:00",
-            "stock_code": daily.get("stock_code"),
-            **levels,
-        }
+        item = {"snapshot_date": daily.get("trade_date"), "snapshot_time": "00:00:00", "stock_code": daily.get("stock_code"), **levels}
         item["raw_data"] = _json_safe(item)
         rows.append(item)
     return rows
@@ -202,67 +170,20 @@ def persist_upload_batch(frames: list[pd.DataFrame], file_records: list[dict]) -
         raise ValueError("Upload batch kosong.")
     if len(file_records) > 20:
         raise ValueError("Maksimal 20 file per batch.")
-
     daily = _daily_payload(frames)
     if not daily:
         raise ValueError("Tidak ada baris BEI valid yang dapat disimpan ke Supabase.")
     orderbook = _orderbook_payload(daily)
-    files = [
-        {
-            "sha256": str(record["sha256"]).strip().lower(),
-            "filename": str(record["filename"]).strip(),
-            "size_bytes": int(record.get("size_bytes", 0)),
-            "rows_read": int(record.get("rows_read", 0)),
-            "rows_saved": int(record.get("rows_saved", 0)),
-            "metadata": _json_safe(record.get("metadata", {})),
-        }
-        for record in file_records
-    ]
+    files = [{"sha256": str(record["sha256"]).strip().lower(), "filename": str(record["filename"]).strip(), "size_bytes": int(record.get("size_bytes", 0)), "rows_read": int(record.get("rows_read", 0)), "rows_saved": int(record.get("rows_saved", 0)), "metadata": _json_safe(record.get("metadata", {}))} for record in file_records]
     batch_key = _batch_key(files)
-
     remote_hashes = _existing_remote_hashes([item["sha256"] for item in files])
     if len(remote_hashes) == len(files):
-        repair = _post_rpc(
-            {"p_daily": daily, "p_orderbook": orderbook},
-            path=REPAIR_RPC_PATH,
-        )
-        return {
-            "saved": True,
-            "duplicate": True,
-            "repaired": True,
-            "repair_daily_rows": int(repair.get("daily_updated", 0)),
-            "repair_orderbook_rows": int(repair.get("orderbook_updated", 0)),
-            "upload_run_id": None,
-            "ledger_rows": 0,
-            "daily_rows": 0,
-            "orderbook_rows": 0,
-        }
+        repair = _post_rpc({"p_daily": daily, "p_orderbook": orderbook}, path=REPAIR_RPC_PATH)
+        return {"saved": True, "duplicate": True, "repaired": True, "repair_daily_rows": int(repair.get("daily_updated", 0)), "repair_orderbook_rows": int(repair.get("orderbook_updated", 0)), "upload_run_id": None, "ledger_rows": 0, "daily_rows": 0, "orderbook_rows": 0}
     if remote_hashes:
-        raise RuntimeError(
-            "Sebagian file batch sudah tercatat di Supabase. "
-            "Pisahkan file lama dan file baru sebelum retry agar tidak terjadi partial batch."
-        )
-
-    result = _post_rpc(
-        {
-            "p_run": {
-                "source": "app_upload",
-                "batch_key": batch_key,
-                "note": f"BEI batch: {len(files)} file(s), {len(daily)} unique daily row(s)",
-            },
-            "p_files": files,
-            "p_daily": daily,
-            "p_orderbook": orderbook,
-        }
-    )
-    return {
-        "saved": True,
-        "duplicate": bool(result.get("duplicate")),
-        "upload_run_id": result.get("upload_run_id"),
-        "ledger_rows": int(result.get("ledger_rows", 0)),
-        "daily_rows": int(result.get("daily_rows", 0)),
-        "orderbook_rows": int(result.get("orderbook_rows", 0)),
-    }
+        raise RuntimeError("Sebagian file batch sudah tercatat di Supabase. Pisahkan file lama dan file baru sebelum retry agar tidak terjadi partial batch.")
+    result = _post_rpc({"p_run": {"source": "app_upload", "batch_key": batch_key, "note": f"BEI batch: {len(files)} file(s), {len(daily)} unique daily row(s)"}, "p_files": files, "p_daily": daily, "p_orderbook": orderbook})
+    return {"saved": True, "duplicate": bool(result.get("duplicate")), "upload_run_id": result.get("upload_run_id"), "ledger_rows": int(result.get("ledger_rows", 0)), "daily_rows": int(result.get("daily_rows", 0)), "orderbook_rows": int(result.get("orderbook_rows", 0))}
 
 
 def _fetch_remote_daily() -> pd.DataFrame:
@@ -273,17 +194,7 @@ def _fetch_remote_daily() -> pd.DataFrame:
     offset = 0
     columns = "trade_date,stock_code,company_name,open_price,high_price,low_price,close_price,volume,value,frequency,foreign_sell,foreign_buy," + ",".join(DAILY_ORDERBOOK_COLUMNS) + ",raw_data"
     while True:
-        response = requests.get(
-            f"{cfg['url']}/rest/v1/stock_daily",
-            headers=_headers(str(cfg["key"])),
-            params={
-                "select": columns,
-                "order": "trade_date.asc,stock_code.asc,id.asc",
-                "limit": PAGE_SIZE,
-                "offset": offset,
-            },
-            timeout=60,
-        )
+        response = requests.get(f"{cfg['url']}/rest/v1/stock_daily", headers=_headers(str(cfg["key"])), params={"select": columns, "order": "trade_date.asc,stock_code.asc,id.asc", "limit": PAGE_SIZE, "offset": offset}, timeout=60)
         if response.status_code >= 400:
             raise RuntimeError(f"Supabase restore {response.status_code}: {response.text[:2000]}")
         page = response.json()
@@ -306,7 +217,6 @@ def restore_from_supabase_if_needed() -> dict[str, object]:
         local_rows = int(conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0])
     if local_rows > 0:
         return {"restored": False, "reason": "local_data_present", "rows": local_rows}
-
     remote = _fetch_remote_daily()
     if remote.empty:
         return {"restored": False, "reason": "supabase_empty", "rows": 0}
