@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pandas as pd
@@ -74,9 +75,7 @@ def sync_local_from_supabase() -> dict[str, object]:
 
     Uploads are committed to Supabase before local completion is reported, so Supabase
     is the canonical source. If the local read model has a different row count or
-    latest trade date (for example, an old restored backup containing stale dates),
-    replace the local read model with the canonical remote rows. If Supabase is
-    unreachable, leave local data untouched and let the app continue in offline mode.
+    latest trade date, replace the local read model with the canonical remote rows.
     """
     cfg = config()
     if not cfg["enabled"]:
@@ -113,7 +112,9 @@ def sync_local_from_supabase() -> dict[str, object]:
             values = [row.get(column) for column in daily_columns]
             raw = row.get("raw_data")
             if raw is None:
-                raw = row
+                raw = json.dumps(row, ensure_ascii=False, default=str)
+            elif isinstance(raw, (dict, list)):
+                raw = json.dumps(raw, ensure_ascii=False, default=str)
             conn.execute(
                 f"INSERT INTO stock_daily ({', '.join(daily_insert_columns)}) VALUES ({','.join('?' for _ in daily_insert_columns)})",
                 values + [raw],
@@ -123,7 +124,9 @@ def sync_local_from_supabase() -> dict[str, object]:
             values = [row.get(column) for column in ORDERBOOK_COLUMNS]
             raw = row.get("raw_data")
             if raw is None:
-                raw = row
+                raw = json.dumps(row, ensure_ascii=False, default=str)
+            elif isinstance(raw, (dict, list)):
+                raw = json.dumps(raw, ensure_ascii=False, default=str)
             conn.execute(
                 f"INSERT INTO orderbook_snapshot ({', '.join(orderbook_insert_columns)}) VALUES ({','.join('?' for _ in orderbook_insert_columns)})",
                 values + [raw],
