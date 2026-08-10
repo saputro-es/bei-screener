@@ -35,6 +35,31 @@ def _format_trade_date_display(data: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
+def _persistence_summary(persistence_info: dict[str, object]) -> str:
+    """Describe durable storage without calling a primary Supabase write a backup."""
+    supabase_ok = bool(persistence_info.get("supabase_reachable"))
+    github_ok = bool(persistence_info.get("github_remote_available"))
+    if supabase_ok and github_ok:
+        return "🟢 Primary Supabase aktif + secondary GitHub recovery snapshot tersedia"
+    if supabase_ok:
+        return "🟢 Primary Supabase aktif | secondary GitHub recovery snapshot belum dikonfigurasi"
+    if github_ok:
+        return "🟡 Secondary GitHub recovery snapshot tersedia | primary Supabase belum terverifikasi"
+    return "🔴 Penyimpanan durable belum terverifikasi"
+
+
+def _backup_confirmation(backup_result: dict[str, object]) -> str:
+    """Build a truthful post-upload confirmation for the configured durable backend."""
+    backend = str(backup_result.get("backend", ""))
+    rows = int(backup_result.get("rows", 0) or 0)
+    if backend == "supabase":
+        return f"Primary Supabase tersimpan dan terverifikasi ({rows:,} baris). Secondary GitHub recovery snapshot tidak dikonfigurasi."
+    if backend == "github":
+        size_mb = int(backup_result.get("asset_size", 0) or 0) / 1024 / 1024
+        return f"Primary Supabase tersimpan; secondary GitHub recovery snapshot berhasil ({size_mb:.2f} MB)."
+    return "Penyimpanan durable berhasil dikonfirmasi."
+
+
 def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
     required = {"trade_date", "stock_code", *DAILY_ORDERBOOK_COLUMNS}
     if data.empty or not required.issubset(data.columns):
@@ -121,18 +146,17 @@ with st.sidebar:
     st.write(f"📅 Hari: {info['total_days']:,}")
     st.write(f"📖 Baris dengan field Bid/Offer: {info['orderbook_rows']:,}")
     st.divider()
-    st.subheader("💾 Penyimpanan permanen")
+    st.subheader("💾 Penyimpanan durable")
     if not persistence_cfg["enabled"]:
         st.error("Belum aktif. Upload dikunci agar data tidak hilang saat redeploy.")
-        st.caption("Tambahkan GITHUB_TOKEN, GITHUB_REPO, dan GITHUB_RELEASE_TAG ke Streamlit Secrets.")
+        st.caption("Tambahkan SUPABASE_SECRET_KEY untuk primary Supabase, atau GITHUB_TOKEN untuk secondary recovery snapshot.")
     elif restore_result.get("restored"):
         st.success(f"Database dipulihkan: {int(restore_result.get('rows', 0)):,} baris")
+        st.caption(_persistence_summary(persistence_info))
     elif restore_result.get("error"):
-        st.error(f"Gagal memulihkan backup: {restore_result['error']}")
-    elif persistence_info.get("remote_available"):
-        st.success("Backup permanen tersedia")
+        st.error(f"Gagal memulihkan storage: {restore_result['error']}")
     else:
-        st.info("Backup permanen belum dibuat. Upload pertama akan membuatnya.")
+        st.success(_persistence_summary(persistence_info))
 
 if "upload_notice" in st.session_state:
     upload_notice = st.session_state.pop("upload_notice")
@@ -147,7 +171,7 @@ st.subheader("📂 Upload data BEI")
 st.caption(
     f"Maksimal {MAX_FILES_PER_BATCH} file per batch. File yang sudah pernah masuk akan dilewati otomatis berdasarkan SHA-256, "
     "kecuali jika dipilih ulang untuk memperbaiki field historis yang sebelumnya kosong. "
-    "Data hanya dianggap selesai setelah backup permanen berhasil."
+    "Data hanya dianggap selesai setelah primary durable store berhasil; jika GitHub dikonfigurasi, recovery snapshot sekunder juga dibuat."
 )
 
 if not persistence_cfg["enabled"]:
@@ -216,8 +240,8 @@ if submitted:
                     backup_result = backup_database()
                     message = (
                         f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki "
-                        f"dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. Ledger tidak bertambah; "
-                        f"backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
+                        f"dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. Ledger tidak bertambah. "
+                        f"{_backup_confirmation(backup_result)}"
                     )
                     st.session_state.upload_notice = {"kind": "success", "message": message}
                 else:
@@ -225,7 +249,7 @@ if submitted:
                     backup_result = backup_database()
                     message = (
                         f"💾 Selesai dan aman: {result['files_saved']} file | {result['rows_saved']:,} baris unik disimpan/di-update | "
-                        f"{result['orderbook_rows']:,} snapshot orderbook | backup permanen {int(backup_result['asset_size']) / 1024 / 1024:.2f} MB."
+                        f"{result['orderbook_rows']:,} snapshot orderbook | {_backup_confirmation(backup_result)}"
                     )
                     st.session_state.upload_notice = {"kind": "success", "message": message}
             progress.empty()
@@ -233,7 +257,7 @@ if submitted:
             st.rerun()
         except Exception as exc:
             progress.empty()
-            st.session_state.upload_notice = {"kind": "error", "message": "❌ Batch belum dianggap selesai karena persistence/backup gagal. Data tidak akan kami anggap aman sebelum proses berhasil: " + str(exc)}
+            st.session_state.upload_notice = {"kind": "error", "message": "❌ Batch belum dianggap selesai karena persistence/backup gagal. Data tidak akan kami anggap aman sebelum primary durable store berhasil: " + str(exc)}
             st.rerun()
 
 st.divider()
