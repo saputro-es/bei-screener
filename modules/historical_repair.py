@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .database import DAILY_ORDERBOOK_COLUMNS, normalize_dataframe
-from .supabase_persistence import _post_rpc, _row_to_json
+from .supabase_persistence import _json_safe, _post_rpc, _row_to_json
 
 REPAIR_RPC_PATH = "/rest/v1/rpc/repair_historical_missing_fields"
 
@@ -40,7 +40,7 @@ def repair_frames(frames: list[pd.DataFrame]) -> dict[str, int]:
     orderbook = []
     for _, row in data.iterrows():
         levels = {column: row.get(column) for column in DAILY_ORDERBOOK_COLUMNS}
-        if not any(value is not None for value in levels.values()):
+        if not any(pd.notna(value) for value in levels.values()):
             continue
         item = {
             "snapshot_date": row.get("trade_date"),
@@ -48,13 +48,15 @@ def repair_frames(frames: list[pd.DataFrame]) -> dict[str, int]:
             "stock_code": row.get("stock_code"),
             **levels,
         }
-        # Preserve the complete source row here too; the canonical orderbook
-        # columns remain at the top level for the RPC recordset.
+        # Normalize every value in the complete orderbook record as well.
+        # This is critical for duplicate-file repair because pandas may retain
+        # numpy NaN values in orderbook columns that are absent in the source.
+        item = _json_safe(item)
         item["raw_data"] = _row_to_json(row)
         orderbook.append(item)
 
     result = _post_rpc(
-        {"p_daily": daily, "p_orderbook": orderbook},
+        _json_safe({"p_daily": daily, "p_orderbook": orderbook}),
         path=REPAIR_RPC_PATH,
     )
     return {
