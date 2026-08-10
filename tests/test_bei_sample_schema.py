@@ -28,6 +28,11 @@ def test_real_bei_offer_volume_maps_to_ask_volume_1():
     assert data.loc[0, "bid_volume_1"] == 900
 
 
+def test_indonesian_bei_month_abbreviation_is_parsed():
+    data = normalize_dataframe(pd.DataFrame([_bei_row("03 Agt 2026")]))
+    assert data.loc[0, "trade_date"] == "2026-08-03"
+
+
 def test_three_day_net_buy_is_not_exposed_before_three_complete_days():
     two_days = pd.DataFrame([
         _bei_row("30/07/2026", 700, 300),
