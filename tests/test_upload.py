@@ -1,6 +1,7 @@
 import sqlite3
 
 import pandas as pd
+import pytest
 
 import modules.database as database
 import modules.upload as upload
@@ -84,3 +85,60 @@ def test_existing_hashes(monkeypatch, tmp_path):
         conn.commit()
 
     assert upload.existing_hashes(["known", "unknown"]) == {"known"}
+
+
+def test_filename_date_prevents_iso_day_month_inversion(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    frame = pd.DataFrame(
+        {
+            # This is what the current double-normalization path can produce
+            # from a workbook whose real filename date is 2026-07-06.
+            "trade_date": ["2026-06-07"],
+            "stock_code": ["TEST"],
+            "close_price": [100],
+        }
+    )
+    result = upload.save_upload_batch(
+        [frame],
+        [{"sha256": "date-6", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}],
+    )
+    assert result["rows_saved"] == 1
+    with sqlite3.connect(upload.DATABASE_FILE) as conn:
+        assert conn.execute("SELECT trade_date FROM stock_daily").fetchone()[0] == "2026-07-06"
+
+
+def test_filename_date_prevents_august_instead_of_july(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    frame = pd.DataFrame(
+        {"trade_date": ["2026-08-07"], "stock_code": ["TEST"], "close_price": [100]}
+    )
+    upload.save_upload_batch(
+        [frame],
+        [{"sha256": "date-8", "filename": "Ringkasan Saham-20260708.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}],
+    )
+    with sqlite3.connect(upload.DATABASE_FILE) as conn:
+        assert conn.execute("SELECT trade_date FROM stock_daily").fetchone()[0] == "2026-07-08"
+
+
+def test_filename_date_rejects_unrelated_mismatch(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    frame = pd.DataFrame(
+        {"trade_date": ["2026-07-05"], "stock_code": ["TEST"], "close_price": [100]}
+    )
+    with pytest.raises(ValueError, match="tidak cocok"):
+        upload.save_upload_batch(
+            [frame],
+            [{"sha256": "bad-date", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}],
+        )
+
+
+def test_filename_date_rejects_multiple_trade_dates(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    frame = pd.DataFrame(
+        {"trade_date": ["2026-07-06", "2026-07-07"], "stock_code": ["AAA", "BBB"], "close_price": [100, 101]}
+    )
+    with pytest.raises(ValueError, match="tepat satu tanggal"):
+        upload.save_upload_batch(
+            [frame],
+            [{"sha256": "multi-date", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 2, "rows_saved": 2}],
+        )
