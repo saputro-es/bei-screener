@@ -14,6 +14,8 @@ PAGE_SIZE = 1000
 TIMEOUT_SECONDS = 60
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 SQLITE_RETRIES = 4
+CANONICAL_DAILY_TABLE = "canonical_stock_daily"
+CANONICAL_ORDERBOOK_TABLE = "canonical_orderbook_snapshot"
 
 
 def _connect_local() -> sqlite3.Connection:
@@ -68,13 +70,13 @@ def _local_signature() -> tuple[int, str | None]:
 
 def _remote_signature(cfg: dict[str, str | bool]) -> tuple[int, str | None]:
     response = requests.get(
-        f"{cfg['url']}/rest/v1/stock_daily",
+        f"{cfg['url']}/rest/v1/{CANONICAL_DAILY_TABLE}",
         headers={**_headers(str(cfg['key'])), "Prefer": "count=exact"},
         params={"select": "id,trade_date", "order": "trade_date.desc", "limit": 1},
         timeout=TIMEOUT_SECONDS,
     )
     if response.status_code >= 400:
-        raise RuntimeError(f"Supabase stock_daily {response.status_code}: {response.text[:1000]}")
+        raise RuntimeError(f"Supabase {CANONICAL_DAILY_TABLE} {response.status_code}: {response.text[:1000]}")
     content_range = response.headers.get("Content-Range", "")
     total = None
     if "/" in content_range:
@@ -90,8 +92,9 @@ def _remote_signature(cfg: dict[str, str | bool]) -> tuple[int, str | None]:
 
 
 def _replace_local_once(cfg: dict[str, str | bool], remote_count: int, remote_latest: str | None) -> dict[str, object]:
-    daily_rows = _fetch_all(cfg, "stock_daily")
-    orderbook_rows = _fetch_all(cfg, "orderbook_snapshot")
+    """Replace the local read model from the immutable canonical baseline."""
+    daily_rows = _fetch_all(cfg, CANONICAL_DAILY_TABLE)
+    orderbook_rows = _fetch_all(cfg, CANONICAL_ORDERBOOK_TABLE)
     if len(daily_rows) != remote_count:
         raise RuntimeError(
             f"Verifikasi sync gagal: remote signature {remote_count} row, tetapi fetch mendapatkan {len(daily_rows)} row."
@@ -143,7 +146,7 @@ def _replace_local_once(cfg: dict[str, str | bool], remote_count: int, remote_la
 
     return {
         "synced": True,
-        "reason": "remote_canonical_data",
+        "reason": "immutable_canonical_baseline",
         "rows": len(daily_rows),
         "orderbook_rows": len(orderbook_rows),
         "latest_date": remote_latest,
@@ -163,7 +166,7 @@ def _replace_local_with_remote(cfg: dict[str, str | bool], remote_count: int, re
 
 
 def sync_local_from_supabase(force: bool = False) -> dict[str, object]:
-    """Reconcile SQLite with canonical Supabase data before analysis."""
+    """Reconcile SQLite with the immutable canonical Supabase baseline before analysis."""
     cfg = config()
     if not cfg["enabled"]:
         return {"synced": False, "reason": "supabase_disabled"}
