@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Iterable
 
@@ -17,6 +18,7 @@ from .database import (
 from .supabase_persistence import config as supabase_config, persist_upload_batch
 
 MAX_FILES_PER_BATCH = 20
+_FILENAME_DATE_RE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
 
 DAILY_COLUMNS = [
     "trade_date", "stock_code", "company_name", "open_price", "high_price",
@@ -27,6 +29,55 @@ DAILY_COLUMNS = [
 
 def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _expected_trade_date(filename: str) -> str | None:
+    match = _FILENAME_DATE_RE.search(str(filename))
+    if not match:
+        return None
+    return pd.to_datetime(match.group(1), format="%Y%m%d", errors="raise").strftime("%Y-%m-%d")
+
+
+def _prepare_upload_frame(frame: pd.DataFrame, filename: str) -> pd.DataFrame:
+    """Normalize one file and enforce its YYYYMMDD filename date.
+
+    The old parser used ``dayfirst=True`` on ISO dates. Pandas can then
+    interpret 2026-07-06 as 2026-06-07. A daily BEI workbook has one trading
+    date, and the filename is the unambiguous YYYYMMDD source of truth. We
+    correct only the exact day/month inversion caused by that parser; any
+    other disagreement is rejected rather than guessed.
+    """
+    data = normalize_dataframe(frame)
+    expected = _expected_trade_date(filename)
+    if expected is None:
+        return data
+
+    actual_dates = sorted({str(value) for value in data["trade_date"].dropna().unique()})
+    if len(actual_dates) != 1:
+        raise ValueError(
+            f"{filename}: tanggal perdagangan harus tepat satu tanggal; ditemukan {actual_dates or 'kosong'}."
+        )
+
+    actual = actual_dates[0]
+    if actual == expected:
+        return data
+
+    expected_ts = pd.Timestamp(expected)
+    actual_ts = pd.Timestamp(actual)
+    try:
+        swapped = expected_ts.replace(day=expected_ts.month, month=expected_ts.day).strftime("%Y-%m-%d")
+    except ValueError:
+        swapped = None
+
+    if swapped == actual:
+        data = data.copy()
+        data["trade_date"] = expected
+        return data
+
+    raise ValueError(
+        f"{filename}: tanggal file {expected} tidak cocok dengan data Excel {actual}. "
+        "Upload dihentikan agar histori tidak tercatat pada tanggal yang salah."
+    )
 
 
 def _ensure_upload_ledger(conn: sqlite3.Connection) -> None:
@@ -62,21 +113,19 @@ def save_upload_batch(
     frames: list[pd.DataFrame],
     file_records: list[dict],
 ) -> dict[str, int | bool | str | None]:
-    """Persist a whole upload batch.
-
-    When Supabase is configured it is the durable completion gate: remote
-    persistence succeeds before SQLite is committed. When Supabase is not
-    configured, the function retains the legacy local behavior so unit tests
-    and existing GitHub-backup deployments continue to work; the Streamlit UI
-    itself remains locked unless a durable backend is configured.
-    """
+    """Persist a whole upload batch with deterministic trade-date validation."""
     if not frames:
         return {"rows_read": 0, "rows_saved": 0, "orderbook_rows": 0, "files_saved": 0, "supabase_saved": False}
     if len(frames) > MAX_FILES_PER_BATCH:
         raise ValueError(f"Maksimal {MAX_FILES_PER_BATCH} file per batch.")
+    if len(frames) != len(file_records):
+        raise ValueError("Jumlah frame dan metadata file tidak sama.")
 
-    data = pd.concat(frames, ignore_index=True)
-    data = normalize_dataframe(data)
+    prepared_frames = [
+        _prepare_upload_frame(frame, str(record.get("filename", "")))
+        for frame, record in zip(frames, file_records)
+    ]
+    data = pd.concat(prepared_frames, ignore_index=True)
     data = data.dropna(subset=["trade_date", "stock_code"]).copy()
     data = data.drop_duplicates(subset=["trade_date", "stock_code"], keep="last")
     if data.empty:
@@ -88,7 +137,7 @@ def save_upload_batch(
         "upload_run_id": None,
     }
     if supabase_config()["enabled"]:
-        supabase_result = persist_upload_batch(frames, file_records)
+        supabase_result = persist_upload_batch(prepared_frames, file_records)
 
     init_database()
     data = data.copy()
@@ -163,7 +212,7 @@ def save_upload_batch(
         conn.commit()
 
     return {
-        "rows_read": int(sum(len(frame) for frame in frames)),
+        "rows_read": int(sum(len(frame) for frame in prepared_frames)),
         "rows_saved": int(len(data)),
         "orderbook_rows": int(len(orderbook_rows)),
         "files_saved": int(len(records)),
