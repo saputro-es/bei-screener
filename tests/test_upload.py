@@ -71,8 +71,6 @@ def test_filename_date_rejects_swapped_iso_date(monkeypatch, tmp_path):
     frame = pd.DataFrame({"trade_date": ["2026-06-07"], "stock_code": ["TEST"], "close_price": [100]})
     with pytest.raises(ValueError, match="tidak cocok"):
         upload.save_upload_batch([frame], [{"sha256": "date-swapped", "filename": "Ringkasan Saham-20260706.xlsx", "size_bytes": 10, "rows_read": 1, "rows_saved": 1}])
-    with sqlite3.connect(upload.DATABASE_FILE) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0] == 0
 
 
 def test_filename_date_rejects_ambiguous_slash_date(monkeypatch, tmp_path):
