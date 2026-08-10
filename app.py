@@ -24,6 +24,16 @@ def _fmt(value, decimals: int = 0) -> str:
         return "-"
 
 
+def _format_trade_date_display(data: pd.DataFrame) -> pd.DataFrame:
+    """Return a display copy whose trade dates always use unambiguous ISO YYYY-MM-DD."""
+    if data is None or data.empty or "trade_date" not in data.columns:
+        return data.copy() if data is not None else pd.DataFrame()
+    display = data.copy()
+    parsed = pd.to_datetime(display["trade_date"], errors="coerce", format="%Y-%m-%d")
+    display["trade_date"] = parsed.dt.strftime("%Y-%m-%d")
+    return display
+
+
 def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
     """Build the latest five-level orderbook snapshots from the canonical BEI dataset."""
     required = {"trade_date", "stock_code", *DAILY_ORDERBOOK_COLUMNS}
@@ -102,8 +112,6 @@ with st.sidebar:
     else:
         st.info("Backup permanen belum dibuat. Upload pertama akan membuatnya.")
 
-# Keep the last upload result visible after the deliberate Streamlit rerun.
-# This is UI/session state only; it does not alter the persisted dataset.
 if "upload_notice" in st.session_state:
     upload_notice = st.session_state.pop("upload_notice")
     if upload_notice["kind"] == "success":
@@ -127,9 +135,6 @@ if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
 upload_key = f"daily_upload_{st.session_state.upload_generation}"
 
-# Keep the native Streamlit uploader outside st.form. Some mobile browsers
-# fail to repaint the selected-file list when the uploader is nested in a
-# form/container. The separate button remains an explicit commit step.
 files = st.file_uploader(
     "Pilih satu atau beberapa file Ringkasan Saham BEI",
     type=["xlsx", "xls"],
@@ -153,7 +158,6 @@ if submitted:
     if not files:
         st.warning("Pilih minimal satu file Excel terlebih dahulu.")
         st.stop()
-
     if len(files) > MAX_FILES_PER_BATCH:
         st.error(f"❌ Terlalu banyak file: {len(files)}. Maksimal {MAX_FILES_PER_BATCH} file per batch.")
         st.stop()
@@ -251,8 +255,9 @@ Upload **≥200 hari bursa** agar horizon 200D aktif. Jika file BEI menyertakan 
     st.stop()
 
 st.subheader("🗄️ Histori SQLite")
-latest_date = data["trade_date"].max()
-st.write(f"Data terakhir: **{latest_date}** | {len(data):,} baris | Snapshot Bid/Offer: **{len(orderbook):,} saham**")
+latest_date = pd.to_datetime(data["trade_date"], errors="coerce", format="%Y-%m-%d").max()
+latest_date_display = latest_date.strftime("%Y-%m-%d") if pd.notna(latest_date) else "-"
+st.write(f"Data terakhir: **{latest_date_display}** | {len(data):,} baris | Snapshot Bid/Offer: **{len(orderbook):,} saham**")
 
 if len(data["trade_date"].unique()) < 200:
     days_available = int(data["trade_date"].nunique())
@@ -282,25 +287,18 @@ else:
     display["Target Low"] = display["target_low"].round(0)
     display["Target High"] = display["target_high"].round(0)
     display["Stop Loss"] = display["stop_loss"].round(0)
-
     cols = ["stock_code", "company_name", "close_price"] + [f"NB {d}D %" for d in HORIZONS] + [
         "signal", "quality", "Score", "technical_status", "RSI14", "SMA20", "SMA50", "SMA200", "Vol Ratio",
         "OB Pressure %", "OB Imbalance %", "orderbook_signal", "orderbook_status",
         "Target Low", "Target High", "Stop Loss",
     ]
     cols = [c for c in cols if c in display.columns]
-
     candidate_config = {
         "stock_code": st.column_config.TextColumn("Stock", pinned=True),
         "company_name": st.column_config.TextColumn("Company", pinned=True),
         "close_price": st.column_config.NumberColumn("Close", format="%.0f"),
     }
-    st.dataframe(
-        display[cols],
-        use_container_width=True,
-        hide_index=True,
-        column_config={k: v for k, v in candidate_config.items() if k in cols},
-    )
+    st.dataframe(display[cols], use_container_width=True, hide_index=True, column_config={k: v for k, v in candidate_config.items() if k in cols})
 
     st.subheader("🎯 Detail kandidat")
     for _, row in screened.head(100).iterrows():
@@ -311,15 +309,12 @@ else:
             c3.metric("SMA200", _fmt(row.get("sma200")))
             c4.metric("Vol Ratio", _fmt(row.get("volume_ratio"), 2))
             c5.metric("OB Pressure", _fmt(row.get("book_pressure_pct"), 1))
-
             st.info(f"**Technical readiness:** {row.get('technical_status', '-')}")
-
             horizon_cols = st.columns(len(HORIZONS))
             for col, days in zip(horizon_cols, HORIZONS):
                 value = row.get(f"net_buy_pct_{days}d")
                 available = row.get(f"days_available_{days}d", 0)
                 col.metric(f"NB {days}D", _fmt(value, 1), f"{int(available)}/{days} hari" if pd.notna(value) else "-")
-
             st.write(f"**Kualitas akumulasi:** {row.get('quality', '-')}")
             st.write(
                 f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | "
@@ -333,7 +328,13 @@ st.divider()
 st.subheader("🔎 Detail histori harga")
 selected = st.selectbox("Pilih saham", sorted(data["stock_code"].dropna().unique()))
 stock_history = data[data["stock_code"] == selected].sort_values("trade_date", ascending=False)
-st.dataframe(stock_history, use_container_width=True, hide_index=True)
+stock_history = _format_trade_date_display(stock_history)
+st.dataframe(
+    stock_history,
+    use_container_width=True,
+    hide_index=True,
+    column_config={"trade_date": st.column_config.TextColumn("trade_date", help="Format tanggal standar: YYYY-MM-DD")},
+)
 
 st.subheader("📖 Bid/Offer terbaru dari file BEI")
 if orderbook.empty:
@@ -351,9 +352,4 @@ else:
         "book_pressure_pct": st.column_config.NumberColumn("Bid Pressure %", format="%.2f%%"),
         "orderbook_imbalance_pct": st.column_config.NumberColumn("Imbalance %", format="%.2f%%"),
     }
-    st.dataframe(
-        safe_orderbook,
-        use_container_width=True,
-        hide_index=True,
-        column_config={k: v for k, v in orderbook_config.items() if k in safe_orderbook.columns},
-    )
+    st.dataframe(safe_orderbook, use_container_width=True, hide_index=True, column_config={k: v for k, v in orderbook_config.items() if k in safe_orderbook.columns})
