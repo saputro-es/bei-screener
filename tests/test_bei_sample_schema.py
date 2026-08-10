@@ -33,6 +33,16 @@ def test_indonesian_bei_month_abbreviation_is_parsed():
     assert data.loc[0, "trade_date"] == "2026-08-03"
 
 
+def test_august_2026_file_shape_keeps_one_trade_date_across_rows():
+    data = normalize_dataframe(
+        pd.DataFrame([_bei_row("03 Agt 2026") for _ in range(963)])
+    )
+    assert len(data) == 963
+    assert data["trade_date"].notna().all()
+    assert data["trade_date"].nunique() == 1
+    assert data["trade_date"].iloc[0] == "2026-08-03"
+
+
 def test_three_day_net_buy_is_not_exposed_before_three_complete_days():
     two_days = pd.DataFrame([
         _bei_row("30/07/2026", 700, 300),
