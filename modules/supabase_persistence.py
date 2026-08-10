@@ -18,7 +18,6 @@ REPAIR_RPC_PATH = "/rest/v1/rpc/repair_historical_missing_fields"
 TIMEOUT_SECONDS = 120
 PAGE_SIZE = 1000
 
-
 def _secret(name: str, default: str = "") -> str:
     try:
         value = st.secrets.get(name, default)
@@ -26,22 +25,13 @@ def _secret(name: str, default: str = "") -> str:
         value = os.getenv(name, default)
     return str(value).strip()
 
-
 def config() -> dict[str, str | bool]:
     url = _secret("SUPABASE_URL", DEFAULT_SUPABASE_URL).rstrip("/")
     key = _secret("SUPABASE_SECRET_KEY") or _secret("SUPABASE_SERVICE_ROLE_KEY")
     return {"enabled": bool(url and key), "url": url, "key": key}
 
-
 def _headers(key: str) -> dict[str, str]:
-    return {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "bei-screener-supabase-persistence",
-    }
-
+    return {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "bei-screener-supabase-persistence"}
 
 def _json_default(value):
     if value is None:
@@ -55,10 +45,8 @@ def _json_default(value):
             pass
     return str(value)
 
-
 def _json_safe(value):
     return json.loads(json.dumps(value, ensure_ascii=False, default=_json_default))
-
 
 def _row_to_json(row: pd.Series) -> dict:
     payload = {}
@@ -71,21 +59,12 @@ def _row_to_json(row: pd.Series) -> dict:
         payload[str(key)] = value
     return _json_safe(payload)
 
-
 def _post_rpc(payload: dict, path: str = RPC_PATH) -> dict:
     cfg = config()
     if not cfg["enabled"]:
-        raise RuntimeError(
-            "Supabase historical persistence belum dikonfigurasi. "
-            "Tambahkan SUPABASE_SECRET_KEY ke Streamlit Secrets."
-        )
+        raise RuntimeError("Supabase historical persistence belum dikonfigurasi. Tambahkan SUPABASE_SECRET_KEY ke Streamlit Secrets.")
     try:
-        response = requests.post(
-            f"{cfg['url']}{path}",
-            headers=_headers(str(cfg["key"])),
-            json=payload,
-            timeout=TIMEOUT_SECONDS,
-        )
+        response = requests.post(f"{cfg['url']}{path}", headers=_headers(str(cfg["key"])), json=payload, timeout=TIMEOUT_SECONDS)
     except requests.RequestException as exc:
         raise RuntimeError(f"Supabase RPC network error: {exc}") from exc
     if response.status_code >= 400:
@@ -100,24 +79,16 @@ def _post_rpc(payload: dict, path: str = RPC_PATH) -> dict:
         raise RuntimeError("Supabase RPC mengembalikan format yang tidak dikenal.")
     return body
 
-
 def _existing_remote_hashes(hashes: list[str]) -> set[str]:
-    """Return upload hashes already committed in Supabase."""
     cfg = config()
     values = sorted({str(value).lower() for value in hashes if value})
     if not cfg["enabled"] or not values:
         return set()
-    response = requests.get(
-        f"{cfg['url']}/rest/v1/upload_ledger",
-        headers=_headers(str(cfg["key"])),
-        params={"select": "sha256", "sha256": f"in.({','.join(values)})"},
-        timeout=30,
-    )
+    response = requests.get(f"{cfg['url']}/rest/v1/upload_ledger", headers=_headers(str(cfg["key"])), params={"select": "sha256", "sha256": f"in.({','.join(values)})"}, timeout=30)
     if response.status_code >= 400:
         raise RuntimeError(f"Supabase upload ledger {response.status_code}: {response.text[:2000]}")
     body = response.json()
     return {str(item["sha256"]).lower() for item in body if isinstance(item, dict) and item.get("sha256")}
-
 
 def status() -> dict[str, object]:
     cfg = config()
@@ -140,13 +111,11 @@ def status() -> dict[str, object]:
         result["error"] = str(exc)
     return result
 
-
 def _batch_key(file_records: list[dict]) -> str:
     hashes = sorted(str(record["sha256"]).strip().lower() for record in file_records)
     if not hashes or any(len(value) != 64 for value in hashes):
         raise ValueError("SHA-256 file tidak valid.")
     return hashlib.sha256("\n".join(hashes).encode("utf-8")).hexdigest()
-
 
 def _daily_payload(frames: Iterable[pd.DataFrame]) -> list[dict]:
     data = pd.concat(list(frames), ignore_index=True) if frames else pd.DataFrame()
@@ -155,18 +124,14 @@ def _daily_payload(frames: Iterable[pd.DataFrame]) -> list[dict]:
         return []
     data = data.dropna(subset=["trade_date", "stock_code"]).copy()
     data = data.drop_duplicates(subset=["trade_date", "stock_code"], keep="last")
-    columns = [
-        "trade_date", "stock_code", "company_name", "open_price", "high_price", "low_price",
-        "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy",
-        *DAILY_ORDERBOOK_COLUMNS,
-    ]
+    columns = ["trade_date", "stock_code", "company_name", "open_price", "high_price", "low_price", "close_price", "volume", "value", "frequency", "foreign_sell", "foreign_buy", *DAILY_ORDERBOOK_COLUMNS]
     rows: list[dict] = []
-    for _, row in data[columns].iterrows():
-        item = _row_to_json(row)
-        item["raw_data"] = _row_to_json(data.loc[row.name])
+    for index in data.index:
+        row = data.loc[index]
+        item = _row_to_json(row[columns])
+        item["raw_data"] = _row_to_json(row)
         rows.append(item)
     return rows
-
 
 def _orderbook_payload(daily_rows: list[dict]) -> list[dict]:
     rows: list[dict] = []
@@ -179,9 +144,7 @@ def _orderbook_payload(daily_rows: list[dict]) -> list[dict]:
         rows.append(item)
     return rows
 
-
 def persist_upload_batch(frames: list[pd.DataFrame], file_records: list[dict]) -> dict[str, object]:
-    """Persist one upload batch to Supabase before local completion is recorded."""
     if not frames or not file_records:
         raise ValueError("Upload batch kosong.")
     if len(file_records) > 20:
@@ -200,7 +163,6 @@ def persist_upload_batch(frames: list[pd.DataFrame], file_records: list[dict]) -
         raise RuntimeError("Sebagian file batch sudah tercatat di Supabase. Pisahkan file lama dan file baru sebelum retry agar tidak terjadi partial batch.")
     result = _post_rpc({"p_run": {"source": "app_upload", "batch_key": batch_key, "note": f"BEI batch: {len(files)} file(s), {len(daily)} unique daily row(s)"}, "p_files": files, "p_daily": daily, "p_orderbook": orderbook})
     return {"saved": True, "duplicate": bool(result.get("duplicate")), "upload_run_id": result.get("upload_run_id"), "ledger_rows": int(result.get("ledger_rows", 0)), "daily_rows": int(result.get("daily_rows", 0)), "orderbook_rows": int(result.get("orderbook_rows", 0))}
-
 
 def _fetch_remote_daily() -> pd.DataFrame:
     cfg = config()
@@ -222,9 +184,7 @@ def _fetch_remote_daily() -> pd.DataFrame:
         offset += PAGE_SIZE
     return pd.DataFrame(rows)
 
-
 def restore_from_supabase_if_needed() -> dict[str, object]:
-    """Rebuild the local SQLite operational cache from Supabase when it is empty."""
     cfg = config()
     if not cfg["enabled"]:
         return {"restored": False, "reason": "supabase_not_configured"}
