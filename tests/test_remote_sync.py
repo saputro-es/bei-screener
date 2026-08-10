@@ -10,6 +10,11 @@ def test_sync_replaces_stale_local_trade_dates(monkeypatch, tmp_path):
     monkeypatch.setattr(database, "DATABASE_DIR", db_dir)
     monkeypatch.setattr(database, "DATABASE_FILE", db_file)
     monkeypatch.setattr(remote_sync, "DATABASE_FILE", db_file)
+    monkeypatch.setattr(
+        remote_sync,
+        "config",
+        lambda: {"enabled": True, "url": "https://example.invalid", "key": "test-key"},
+    )
 
     database.init_database()
     with sqlite3.connect(db_file) as conn:
