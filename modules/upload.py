@@ -37,7 +37,7 @@ def _expected_trade_date(filename: str) -> str | None:
 
 
 def _prepare_upload_frame(frame: pd.DataFrame, filename: str) -> pd.DataFrame:
-    """Normalize one file and enforce its YYYYMMDD filename date."""
+    """Normalize one file and require its YYYYMMDD filename date to match the data exactly."""
     data = normalize_dataframe(frame)
     expected = _expected_trade_date(filename)
     if expected is None:
@@ -50,25 +50,12 @@ def _prepare_upload_frame(frame: pd.DataFrame, filename: str) -> pd.DataFrame:
         )
 
     actual = actual_dates[0]
-    if actual == expected:
-        return data
-
-    expected_ts = pd.Timestamp(expected)
-    actual_ts = pd.Timestamp(actual)
-    try:
-        swapped = expected_ts.replace(day=expected_ts.month, month=expected_ts.day).strftime("%Y-%m-%d")
-    except ValueError:
-        swapped = None
-
-    if swapped == actual:
-        data = data.copy()
-        data["trade_date"] = expected
-        return data
-
-    raise ValueError(
-        f"{filename}: tanggal file {expected} tidak cocok dengan data Excel {actual}. "
-        "Upload dihentikan agar histori tidak tercatat pada tanggal yang salah."
-    )
+    if actual != expected:
+        raise ValueError(
+            f"{filename}: tanggal file {expected} tidak cocok dengan data Excel {actual}. "
+            "Upload dihentikan agar histori tidak tercatat pada tanggal yang salah."
+        )
+    return data
 
 
 def _supabase_safe_frames(frames: list[pd.DataFrame]) -> list[pd.DataFrame]:
