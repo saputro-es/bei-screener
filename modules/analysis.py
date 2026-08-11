@@ -7,24 +7,49 @@ HORIZONS = (3, 5, 10, 20, 60, 100, 200)
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate RSI using the original Wilder smoothing method.
+
+    Wilder RSI seeds average gain/loss with the simple mean of the first
+    ``period`` price changes, then recursively smooths both series with
+    ``(previous * (period - 1) + current) / period``.  This is deliberately
+    not pandas EWM initialization: EWM seeded from the first observation can
+    produce a materially different value when only a short history is loaded.
+    Invalid/non-positive closes are treated as missing and never synthesized.
+    """
     close = pd.to_numeric(series, errors="coerce")
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    rsi = pd.Series(np.nan, index=series.index, dtype=float)
-    valid = avg_gain.notna() & avg_loss.notna()
-    both_zero = valid & (avg_gain == 0) & (avg_loss == 0)
-    no_loss = valid & (avg_loss == 0) & (avg_gain > 0)
-    no_gain = valid & (avg_gain == 0) & (avg_loss > 0)
-    normal = valid & (avg_gain > 0) & (avg_loss > 0)
-    rsi.loc[both_zero] = 50.0
-    rsi.loc[no_loss] = 100.0
-    rsi.loc[no_gain] = 0.0
-    rs = avg_gain.loc[normal] / avg_loss.loc[normal]
-    rsi.loc[normal] = 100 - (100 / (1 + rs))
-    return rsi
+    close = close.where(close.gt(0))
+    result = pd.Series(np.nan, index=series.index, dtype=float)
+
+    valid_close = close.dropna()
+    if len(valid_close) <= period:
+        return result
+
+    delta = valid_close.diff().dropna()
+    gain = delta.clip(lower=0).to_numpy(dtype=float)
+    loss = (-delta.clip(upper=0)).to_numpy(dtype=float)
+
+    avg_gain = float(gain[:period].mean())
+    avg_loss = float(loss[:period].mean())
+
+    def _value(gain_avg: float, loss_avg: float) -> float:
+        if gain_avg == 0 and loss_avg == 0:
+            return 50.0
+        if loss_avg == 0:
+            return 100.0
+        if gain_avg == 0:
+            return 0.0
+        rs = gain_avg / loss_avg
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    # The first RSI value is defined after exactly ``period`` price changes.
+    result.loc[valid_close.index[period]] = _value(avg_gain, avg_loss)
+
+    for i in range(period, len(gain)):
+        avg_gain = ((avg_gain * (period - 1)) + gain[i]) / period
+        avg_loss = ((avg_loss * (period - 1)) + loss[i]) / period
+        result.loc[valid_close.index[i + 1]] = _value(avg_gain, avg_loss)
+
+    return result
 
 
 def _atr_group(group: pd.DataFrame, period: int = 14) -> pd.Series:
