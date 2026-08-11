@@ -35,6 +35,8 @@ def test_target_high_hit_then_continue_is_classified_after_post_data():
     data.loc[16, "close_price"] = 103.0
     data.loc[17, "high_price"] = 106.0
     data.loc[17, "close_price"] = 105.0
+    data.loc[18, "high_price"] = 107.0
+    data.loc[18, "close_price"] = 106.0
 
     result = evaluate_target_history(data, threshold=65.0, target_window=5, post_window=2)
     event = result[result["prediction_date"] == pd.Timestamp("2026-07-22")].iloc[0]
