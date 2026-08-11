@@ -10,6 +10,7 @@ from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, 
 from modules.historical_repair import repair_frames
 from modules.orderbook import summarize_orderbook
 from modules.persistence import backup_database, config as persistence_config, restore_if_needed, status as persistence_status
+from modules.post_target import evaluate_target_history
 from modules.remote_sync import sync_local_from_supabase
 from modules.upload import MAX_FILES_PER_BATCH, existing_hashes, save_upload_batch, sha256_bytes
 
@@ -357,6 +358,64 @@ else:
             st.write(f"**Bid/Offer:** {row.get('orderbook_signal', '⚪ Tidak ada')} | Status: {row.get('orderbook_status', '-')} | Pressure {_fmt(row.get('book_pressure_pct'), 2)}% | Imbalance {_fmt(row.get('orderbook_imbalance_pct'), 2)}%")
             st.write(f"**Alasan:** {row.get('reason', '-')}")
             st.write(f"**Target 1 minggu (indikatif, berbasis ATR14 aktual):** {_fmt(row.get('target_low'))} — {_fmt(row.get('target_high'))} | **Stop loss:** {_fmt(row.get('stop_loss'))}")
+
+st.divider()
+st.subheader("🎯 Post-Target Analysis & Validation")
+st.caption(
+    "Setiap target historis dihitung hanya dari data pada tanggal prediksi. Data setelahnya dipakai khusus untuk mengukur hasil: "
+    "Target Low/High hit, stop, volume saat target, rejection, lalu CONTINUE / CONSOLIDATION / REVERSAL. "
+    "Jika data lanjutan belum tersedia, status tetap menunggu — tidak ada angka yang diisi." 
+)
+try:
+    target_events = evaluate_target_history(data, threshold=threshold, target_window=5, post_window=3)
+except Exception as exc:
+    target_events = pd.DataFrame()
+    st.error(f"Post-target validation gagal dihitung: {exc}")
+
+if target_events.empty:
+    st.info("Belum ada event target yang dapat divalidasi. Dibutuhkan ATR14 + Net Buy 3D > threshold pada tanggal prediksi.")
+else:
+    completed = target_events[target_events["validation_complete"]]
+    high_hits = target_events[target_events["hit_type"] == "HIGH"]
+    continue_hits = target_events[target_events["post_status"].str.startswith("🟢", na=False)]
+    consolidation_hits = target_events[target_events["post_status"].str.startswith("🟡", na=False)]
+    reversal_hits = target_events[target_events["post_status"].str.startswith("🔴", na=False)]
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Event prediksi", f"{len(target_events):,}")
+    m2.metric("Target High hit", f"{len(high_hits):,}")
+    m3.metric("Continue", f"{len(continue_hits):,}")
+    m4.metric("Konsolidasi", f"{len(consolidation_hits):,}")
+    m5.metric("Reversal/Koreksi", f"{len(reversal_hits):,}")
+    st.caption(f"Validasi penuh 5 hari: {len(completed):,}/{len(target_events):,} event. Event terbaru yang belum punya cukup data tetap ditandai PENDING.")
+
+    validation_display = target_events.copy()
+    validation_display["Prediction"] = validation_display["prediction_date"].dt.strftime("%Y-%m-%d")
+    validation_display["Hit Date"] = validation_display["hit_date"].dt.strftime("%Y-%m-%d")
+    validation_display["Close"] = validation_display["prediction_close"].round(0)
+    validation_display["NB 3D %"] = validation_display["nb3_pct"].round(2)
+    validation_display["Target Low"] = validation_display["target_low"].round(0)
+    validation_display["Target High"] = validation_display["target_high"].round(0)
+    validation_display["Stop"] = validation_display["stop_loss"].round(0)
+    validation_display["Hit Volume Ratio"] = validation_display["hit_volume_ratio"].round(2)
+    validation_display["Hit RSI14"] = validation_display["hit_rsi14"].round(1)
+    validation_display["Close Location %"] = validation_display["hit_close_location_pct"].round(1)
+    validation_display["Post Last Close"] = validation_display["post_last_close"].round(0)
+    validation_cols = [
+        "stock_code", "Prediction", "Close", "NB 3D %", "Target Low", "Target High", "Stop",
+        "outcome", "Hit Date", "Hit Volume Ratio", "Hit RSI14", "Close Location %",
+        "volume_confirmation", "rejection", "post_status", "Post Last Close", "validation_complete",
+    ]
+    validation_cols = [c for c in validation_cols if c in validation_display.columns]
+    st.dataframe(validation_display[validation_cols].head(200), use_container_width=True, hide_index=True)
+
+    latest_events = target_events.sort_values(["prediction_date", "stock_code"], ascending=[False, True]).groupby("stock_code", as_index=False).head(1)
+    st.write("**Event terbaru per saham**")
+    for _, event in latest_events.head(50).iterrows():
+        status = event.get("post_status") or event.get("outcome") or "⏳ PENDING"
+        st.write(
+            f"**{event['stock_code']}** — prediksi {pd.Timestamp(event['prediction_date']).strftime('%Y-%m-%d')} | "
+            f"target {_fmt(event['target_low'])}–{_fmt(event['target_high'])} | {status}"
+        )
 
 st.divider()
 st.subheader("🔎 Detail histori harga")
