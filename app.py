@@ -72,6 +72,22 @@ def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
     return available.loc[mask].copy()
 
 
+def _orderbook_completeness(data: pd.DataFrame) -> dict[str, int]:
+    """Count only complete levels present in the source; never infer missing quotes."""
+    if data is None or data.empty:
+        return {f"l{level}": 0 for level in range(1, 6)}
+    result: dict[str, int] = {}
+    for level in range(1, 6):
+        columns = [
+            f"bid_price_{level}",
+            f"bid_volume_{level}",
+            f"ask_price_{level}",
+            f"ask_volume_{level}",
+        ]
+        result[f"l{level}"] = int(data[columns].notna().all(axis=1).sum()) if all(c in data.columns for c in columns) else 0
+    return result
+
+
 def _safe_orderbook_table(orderbook: pd.DataFrame) -> pd.DataFrame:
     if orderbook is None or orderbook.empty:
         return pd.DataFrame()
@@ -104,7 +120,7 @@ def _orderbook_sort_key(table: pd.DataFrame) -> pd.DataFrame:
 
 
 st.title("📈 BEI Screener — Multi-Horizon Accumulation + Bid/Offer")
-st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + five-level Bid/Offer snapshot")
+st.caption("Blueprint: Net Buy 3D → 5D → 10D → 20D → 60D → 100D → 200D + technicals + available Bid/Offer snapshot")
 
 try:
     restore_result = restore_if_needed()
@@ -221,11 +237,15 @@ if submitted:
             if normalized.empty:
                 raise ValueError("File tidak berisi baris data.")
             all_frames.append(normalized)
-            l1_complete = int(normalized[["bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1"]].notna().all(axis=1).sum())
-            price_levels = int(normalized[DAILY_ORDERBOOK_COLUMNS].notna().sum(axis=1).gt(0).sum())
-            volume_levels = int(normalized[[c for c in DAILY_ORDERBOOK_COLUMNS if "volume" in c]].notna().sum(axis=1).gt(0).sum())
+            completeness = _orderbook_completeness(normalized)
             file_records.append({"sha256": file_sha, "filename": file.name, "size_bytes": len(file.getvalue()), "rows_read": len(normalized), "rows_saved": len(normalized)})
-            st.success(f"✅ {file.name}: {len(normalized):,} baris | L1 price+volume lengkap: {l1_complete:,} | snapshot price level: {price_levels:,} | snapshot volume: {volume_levels:,}")
+            st.success(
+                f"✅ {file.name}: {len(normalized):,} baris | "
+                f"L1 lengkap: {completeness['l1']:,} | L2: {completeness['l2']:,} | "
+                f"L3: {completeness['l3']:,} | L4: {completeness['l4']:,} | L5: {completeness['l5']:,}"
+            )
+            if any(completeness[f"l{level}"] < len(normalized) for level in range(1, 6)):
+                st.caption("ℹ️ Level Bid/Offer yang tidak tersedia dibiarkan kosong; aplikasi tidak mengisi atau mengestimasi angka yang tidak ada di file sumber.")
         except Exception as exc:
             st.error(f"❌ {file.name}: {exc}")
         finally:
@@ -350,14 +370,20 @@ if orderbook.empty:
     st.info("File BEI belum menyediakan level Bid/Offer yang dapat dibaca.")
 else:
     safe_orderbook = _orderbook_sort_key(orderbook)
+    latest_completeness = _orderbook_completeness(data[data["trade_date"] == latest_date])
+    st.caption("Hanya level yang benar-benar tersedia di file sumber yang dihitung. Level yang tidak tersedia tetap kosong dan tidak pernah diisi dengan angka estimasi.")
+    completeness_cols = st.columns(5)
+    latest_total = len(data[data["trade_date"] == latest_date])
+    for index, level in enumerate(range(1, 6)):
+        completeness_cols[index].metric(f"L{level} lengkap", f"{latest_completeness[f'l{level}']:,}/{latest_total:,}")
     orderbook_config = {
         "stock_code": st.column_config.TextColumn("Stock", pinned=True),
         "best_bid": st.column_config.NumberColumn("Best Bid", format="%.0f"),
         "best_ask": st.column_config.NumberColumn("Best Ask", format="%.0f"),
         "spread": st.column_config.NumberColumn("Spread", format="%.0f"),
         "spread_pct": st.column_config.NumberColumn("Spread %", format="%.2f%%"),
-        "bid_depth_5": st.column_config.NumberColumn("Bid Depth L1-L5", format="%.0f"),
-        "ask_depth_5": st.column_config.NumberColumn("Offer Depth L1-L5", format="%.0f"),
+        "bid_depth_5": st.column_config.NumberColumn("Bid Depth Available", format="%.0f"),
+        "ask_depth_5": st.column_config.NumberColumn("Offer Depth Available", format="%.0f"),
         "book_pressure_pct": st.column_config.NumberColumn("Bid Pressure %", format="%.2f%%"),
         "orderbook_imbalance_pct": st.column_config.NumberColumn("Imbalance %", format="%.2f%%"),
     }
