@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 import modules.database as db
-from modules.analysis import HORIZONS, accumulation_horizons, add_indicators, screen, three_day_accumulation
+from modules.analysis import HORIZONS, _rsi, accumulation_horizons, add_indicators, screen, three_day_accumulation
 from modules.database import normalize_dataframe
 from modules.orderbook import summarize_orderbook
 
@@ -149,6 +149,13 @@ def test_indicators_require_full_window_and_handle_no_loss_rsi():
     assert aaa["sma50"].isna().all()
     assert aaa["sma200"].isna().all()
     assert np.isclose(aaa["rsi14"].iloc[-1], 100.0)
+
+
+def test_wilder_rsi_uses_sma_seed_not_ewm_initialization():
+    closes = pd.Series([100, 102, 101, 103, 102, 104, 103, 105, 104, 106, 105, 107, 106, 108, 107], dtype=float)
+    rsi = _rsi(closes, period=14)
+    # 7 gains of 2 and 7 losses of 1 over the first 14 changes => RS=2 => RSI=66.6667.
+    assert np.isclose(rsi.iloc[-1], 66.6666666667, atol=1e-10)
 
 
 def test_short_history_is_explicitly_marked_not_fabricated():
