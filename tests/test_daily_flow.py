@@ -42,7 +42,10 @@ def test_missing_source_values_are_not_fabricated():
 
 
 def test_duplicate_date_keeps_last_source_row():
-    data = pd.concat([_rows(), _rows().iloc[[3]].assign(foreign_buy=80, volume=12000)], ignore_index=True)
+    data = pd.concat(
+        [_rows(), _rows().iloc[[3]].assign(foreign_buy=80, foreign_sell=20, volume=12000)],
+        ignore_index=True,
+    )
     result = daily_net_buy_volume_matrix(data, days=1).iloc[0]
     assert result["d1_net_buy_pct"] == 80.0
     assert result["d1_volume_lot"] == 120.0
