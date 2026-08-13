@@ -36,20 +36,15 @@ if daily.empty:
 
 # Use all available valid daily Net Buy observations for the consistency test.
 nb_cols = [c for c in daily.columns if c.endswith("_net_buy_pct")]
-vol_cols = [c for c in daily.columns if c.endswith("_volume_lot")]
 latest_nb = daily["d1_net_buy_pct"]
 latest_vol = daily["d1_volume_lot"]
 valid_nb = daily[nb_cols].apply(pd.to_numeric, errors="coerce")
 valid_counts = valid_nb.notna().sum(axis=1)
-above_50_counts = valid_nb.gt(50).sum(axis=1)
-consistency_pct = np.where(valid_counts > 0, above_50_counts / valid_counts * 100.0, np.nan)
 
 ranking = daily[["stock_code", "daily_days_available"]].copy()
 ranking["latest_nb_pct"] = latest_nb
 ranking["latest_volume_lot"] = latest_vol
 ranking["valid_nb_days"] = valid_counts
-ranking["above_50_days"] = above_50_counts
-ranking["consistency_pct"] = consistency_pct
 ranking["avg_nb_pct"] = valid_nb.mean(axis=1, skipna=True)
 ranking["min_nb_pct"] = valid_nb.min(axis=1, skipna=True)
 
@@ -60,7 +55,7 @@ source = source.dropna(subset=["stock_code", "trade_date"]).sort_values("trade_d
 source = source[[c for c in ["stock_code", "company_name", "trade_date", "close_price"] if c in source.columns]]
 ranking = ranking.merge(source, on="stock_code", how="left")
 
-# Keep the machine's existing multi-horizon analysis as a secondary quality/risk layer.
+# Keep the existing multi-horizon analysis as a secondary quality/risk layer.
 orderbook_raw = pd.DataFrame()
 ob_columns = [c for c in data.columns if c.startswith(("bid_price_", "bid_volume_", "ask_price_", "ask_volume_"))]
 if ob_columns:
@@ -74,11 +69,27 @@ orderbook = summarize_orderbook(orderbook_raw) if not orderbook_raw.empty else p
 
 threshold = st.number_input("Minimal Net Buy harian (%)", min_value=0.0, max_value=100.0, value=50.0, step=1.0)
 min_volume = st.number_input("Minimal volume terbaru (lot)", min_value=0, value=1000, step=100)
-min_valid_days = st.number_input("Minimal hari Net Buy valid", min_value=1, max_value=max(1, len(nb_cols)), value=min(3, max(1, len(nb_cols))), step=1)
+min_valid_days = st.number_input(
+    "Minimal hari Net Buy valid",
+    min_value=1,
+    max_value=max(1, len(nb_cols)),
+    value=min(3, max(1, len(nb_cols))),
+    step=1,
+)
 
+# A stock passes only when EVERY valid daily Net Buy observation is above the
+# selected threshold. Missing source values are ignored rather than fabricated.
+valid_above_threshold = valid_nb.gt(threshold)
+ranking["above_threshold_days"] = valid_above_threshold.sum(axis=1)
+ranking["consistency_pct"] = np.where(
+    ranking["valid_nb_days"] > 0,
+    ranking["above_threshold_days"] / ranking["valid_nb_days"] * 100.0,
+    np.nan,
+)
 ranking["passes_consistency"] = (
-    ranking["valid_nb_days"] >= min_valid_days
-    ) & (ranking["above_50_days"] == ranking["valid_nb_days"])
+    (ranking["valid_nb_days"] >= min_valid_days)
+    & (ranking["above_threshold_days"] == ranking["valid_nb_days"])
+)
 ranking["passes_volume"] = ranking["latest_volume_lot"] >= min_volume
 
 candidates = ranking[ranking["passes_consistency"] & ranking["passes_volume"]].copy()
@@ -144,7 +155,7 @@ selected_codes = st.multiselect(
     format_func=_label,
     default=options[:1],
     max_selections=20,
-    help="Daftar sudah diranking otomatis; saham tidak lagi disajikan berdasarkan abjad."
+    help="Daftar sudah diranking otomatis; saham tidak lagi disajikan berdasarkan abjad.",
 )
 
 if not selected_codes:
