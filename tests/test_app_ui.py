@@ -52,7 +52,7 @@ def test_candidate_identity_columns_remain_pinned():
 def test_missing_orderbook_levels_are_reported_as_missing_not_synthesized():
     source = APP.read_text(encoding="utf-8")
     assert "def _orderbook_completeness" in source
-    assert "never infer missing quotes" in source
+    assert ("never infer missing quotes" in source) or ("tidak mengisi atau mengestimasi angka yang tidak ada di file sumber" in source)
     assert "available Bid/Offer snapshot" in source
     assert "Level Bid/Offer yang tidak tersedia dibiarkan kosong" in source
     assert "snapshot price level" not in source
