@@ -7,6 +7,7 @@ import streamlit as st
 
 from modules.analysis import HORIZONS, screen
 from modules.database import DAILY_ORDERBOOK_COLUMNS, database_info, load_data, normalize_dataframe
+from modules.dominance import thirty_day_dominance
 from modules.historical_repair import repair_frames
 from modules.orderbook import summarize_orderbook
 from modules.persistence import backup_database, config as persistence_config, restore_if_needed, status as persistence_status
@@ -27,7 +28,6 @@ def _fmt(value, decimals: int = 0) -> str:
 
 
 def _format_trade_date_display(data: pd.DataFrame) -> pd.DataFrame:
-    """Return a display copy whose trade dates always use unambiguous ISO YYYY-MM-DD."""
     if data is None or data.empty or "trade_date" not in data.columns:
         return data.copy() if data is not None else pd.DataFrame()
     display = data.copy()
@@ -37,7 +37,6 @@ def _format_trade_date_display(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _persistence_summary(persistence_info: dict[str, object]) -> str:
-    """Describe durable storage without calling a primary Supabase write a backup."""
     supabase_ok = bool(persistence_info.get("supabase_reachable"))
     github_ok = bool(persistence_info.get("github_remote_available"))
     if supabase_ok and github_ok:
@@ -50,7 +49,6 @@ def _persistence_summary(persistence_info: dict[str, object]) -> str:
 
 
 def _backup_confirmation(backup_result: dict[str, object]) -> str:
-    """Build a truthful post-upload confirmation for the configured durable backend."""
     backend = str(backup_result.get("backend", ""))
     rows = int(backup_result.get("rows", 0) or 0)
     if backend == "supabase":
@@ -74,17 +72,11 @@ def _embedded_orderbook(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _orderbook_completeness(data: pd.DataFrame) -> dict[str, int]:
-    """Count only complete levels present in the source; never infer missing quotes."""
     if data is None or data.empty:
         return {f"l{level}": 0 for level in range(1, 6)}
     result: dict[str, int] = {}
     for level in range(1, 6):
-        columns = [
-            f"bid_price_{level}",
-            f"bid_volume_{level}",
-            f"ask_price_{level}",
-            f"ask_volume_{level}",
-        ]
+        columns = [f"bid_price_{level}", f"bid_volume_{level}", f"ask_price_{level}", f"ask_volume_{level}"]
         result[f"l{level}"] = int(data[columns].notna().all(axis=1).sum()) if all(c in data.columns for c in columns) else 0
     return result
 
@@ -128,8 +120,6 @@ try:
 except Exception as exc:
     restore_result = {"restored": False, "error": str(exc)}
 
-# Supabase is the canonical analytical dataset. Check it once per browser session so
-# an old restored SQLite file cannot silently feed stale prices/indicators into the UI.
 if not st.session_state.get("canonical_sync_checked"):
     try:
         sync_result = sync_local_from_supabase(force=True)
@@ -141,15 +131,9 @@ else:
     sync_result = st.session_state.get("canonical_sync_result", {"synced": False, "reason": "already_checked"})
 
 if sync_result.get("synced"):
-    st.info(
-        f"🔄 Histori lokal diselaraskan dengan sumber kanonik: "
-        f"{int(sync_result.get('rows', 0)):,} baris | tanggal terakhir {sync_result.get('latest_date', '-')}"
-    )
+    st.info(f"🔄 Histori lokal diselaraskan dengan sumber kanonik: {int(sync_result.get('rows', 0)):,} baris | tanggal terakhir {sync_result.get('latest_date', '-')}")
 elif sync_result.get("reason") == "sync_error":
-    st.error(
-        "⚠️ Sumber kanonik tidak dapat diverifikasi. Analisis baru dikunci agar aplikasi tidak menampilkan angka dari data lokal yang mungkin stale. "
-        f"Detail: {sync_result.get('error', '-')}"
-    )
+    st.error("⚠️ Sumber kanonik tidak dapat diverifikasi. Analisis baru dikunci agar aplikasi tidak menampilkan angka dari data lokal yang mungkin stale. " + f"Detail: {sync_result.get('error', '-')}")
     st.stop()
 
 info = database_info()
@@ -240,11 +224,7 @@ if submitted:
             all_frames.append(normalized)
             completeness = _orderbook_completeness(normalized)
             file_records.append({"sha256": file_sha, "filename": file.name, "size_bytes": len(file.getvalue()), "rows_read": len(normalized), "rows_saved": len(normalized)})
-            st.success(
-                f"✅ {file.name}: {len(normalized):,} baris | "
-                f"L1 lengkap: {completeness['l1']:,} | L2: {completeness['l2']:,} | "
-                f"L3: {completeness['l3']:,} | L4: {completeness['l4']:,} | L5: {completeness['l5']:,}"
-            )
+            st.success(f"✅ {file.name}: {len(normalized):,} baris | L1 lengkap: {completeness['l1']:,} | L2: {completeness['l2']:,} | L3: {completeness['l3']:,} | L4: {completeness['l4']:,} | L5: {completeness['l5']:,}")
             if any(completeness[f"l{level}"] < len(normalized) for level in range(1, 6)):
                 st.caption("ℹ️ Level Bid/Offer yang tidak tersedia dibiarkan kosong; aplikasi tidak mengisi atau mengestimasi angka yang tidak ada di file sumber.")
         except Exception as exc:
@@ -259,19 +239,12 @@ if submitted:
                     repair_result = repair_frames(all_frames)
                     result = save_upload_batch(all_frames, file_records)
                     backup_result = backup_database()
-                    message = (
-                        f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki "
-                        f"dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. Ledger tidak bertambah. "
-                        f"{_backup_confirmation(backup_result)}"
-                    )
+                    message = f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. Ledger tidak bertambah. {_backup_confirmation(backup_result)}"
                     st.session_state.upload_notice = {"kind": "success", "message": message}
                 else:
                     result = save_upload_batch(all_frames, file_records)
                     backup_result = backup_database()
-                    message = (
-                        f"💾 Selesai dan aman: {result['files_saved']} file | {result['rows_saved']:,} baris unik disimpan/di-update | "
-                        f"{result['orderbook_rows']:,} snapshot orderbook | {_backup_confirmation(backup_result)}"
-                    )
+                    message = f"💾 Selesai dan aman: {result['files_saved']} file | {result['rows_saved']:,} baris unik disimpan/di-update | {result['orderbook_rows']:,} snapshot orderbook | {_backup_confirmation(backup_result)}"
                     st.session_state.upload_notice = {"kind": "success", "message": message}
             progress.empty()
             st.session_state.upload_generation += 1
@@ -361,11 +334,7 @@ else:
 
 st.divider()
 st.subheader("🎯 Post-Target Analysis & Validation")
-st.caption(
-    "Setiap target historis dihitung hanya dari data pada tanggal prediksi. Data setelahnya dipakai khusus untuk mengukur hasil: "
-    "Target Low/High hit, stop, volume saat target, rejection, lalu CONTINUE / CONSOLIDATION / REVERSAL. "
-    "Jika data lanjutan belum tersedia, status tetap menunggu — tidak ada angka yang diisi." 
-)
+st.caption("Setiap target historis dihitung hanya dari data pada tanggal prediksi. Data setelahnya dipakai khusus untuk mengukur hasil: Target Low/High hit, stop, volume saat target, rejection, lalu CONTINUE / CONSOLIDATION / REVERSAL. Jika data lanjutan belum tersedia, status tetap menunggu — tidak ada angka yang diisi.")
 try:
     target_events = evaluate_target_history(data, threshold=threshold, target_window=5, post_window=3)
 except Exception as exc:
@@ -412,14 +381,49 @@ else:
     st.write("**Event terbaru per saham**")
     for _, event in latest_events.head(50).iterrows():
         status = event.get("post_status") or event.get("outcome") or "⏳ PENDING"
-        st.write(
-            f"**{event['stock_code']}** — prediksi {pd.Timestamp(event['prediction_date']).strftime('%Y-%m-%d')} | "
-            f"target {_fmt(event['target_low'])}–{_fmt(event['target_high'])} | {status}"
-        )
+        st.write(f"**{event['stock_code']}** — prediksi {pd.Timestamp(event['prediction_date']).strftime('%Y-%m-%d')} | target {_fmt(event['target_low'])}–{_fmt(event['target_high'])} | {status}")
 
 st.divider()
 st.subheader("🔎 Detail histori harga")
 selected = st.selectbox("Pilih saham", sorted(data["stock_code"].dropna().unique()))
+
+# Keep the manual selector alphabetical. The new section below is independent:
+# it ranks stocks by aggregate foreign-buy dominance over the latest 30 trading
+# sessions. The 50% rule is applied to the full 30-day aggregate, not every day.
+dominance_30d = thirty_day_dominance(data, days=30, threshold=50.0)
+st.subheader("🔥 Dominasi Foreign Buy 30 Hari Perdagangan")
+st.caption("Filter ini TIDAK mensyaratkan Net Buy ≥50% setiap hari. Saham lolos jika akumulasi Foreign Buy / (Foreign Buy + Foreign Sell) selama 30 hari perdagangan terakhir ≥50%. Kolom hari dominan hanya informasi tambahan.")
+
+if dominance_30d.empty:
+    st.info("Belum ada saham yang memenuhi 30 hari perdagangan lengkap dengan data Foreign Buy/Sell.")
+else:
+    dominance_display = dominance_30d.copy()
+    dominance_display["Dominasi 30D %"] = dominance_display["dominance_30d_pct"].round(2)
+    dominance_display["Hari ≥50%"] = dominance_display["dominant_days_30d"]
+    dominance_display["Dominasi Harian %"] = dominance_display["dominant_days_pct"].round(1)
+    dominance_display["Net Buy 30D"] = dominance_display["net_buy_30d"].round(0)
+    dominance_display["Close"] = dominance_display["close_price"].round(0)
+    dominance_display["Volume"] = dominance_display["volume"].round(0)
+    dominance_display["Data per"] = pd.to_datetime(dominance_display["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    dominance_cols = [
+        "stock_code", "company_name", "Data per", "Close", "Volume",
+        "Dominasi 30D %", "Hari ≥50%", "Dominasi Harian %", "Net Buy 30D",
+    ]
+    dominance_cols = [c for c in dominance_cols if c in dominance_display.columns]
+    st.dataframe(
+        dominance_display[dominance_cols].head(200),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "stock_code": st.column_config.TextColumn("Stock", pinned=True),
+            "company_name": st.column_config.TextColumn("Company", pinned=True),
+            "Dominasi 30D %": st.column_config.NumberColumn("Dominasi 30D", format="%.2f%%"),
+            "Dominasi Harian %": st.column_config.NumberColumn("Hari Dominan", format="%.1f%%"),
+            "Net Buy 30D": st.column_config.NumberColumn("Net Buy 30D", format="%.0f"),
+        },
+    )
+    st.caption(f"🟢 {len(dominance_30d):,} saham lolos. Ranking diurutkan dari dominasi agregat 30D tertinggi; bukan berdasarkan abjad.")
+
 stock_history = data[data["stock_code"] == selected].sort_values("trade_date", ascending=False)
 stock_history = _format_trade_date_display(stock_history)
 st.dataframe(stock_history, use_container_width=True, hide_index=True, column_config={"trade_date": st.column_config.TextColumn("trade_date", help="Format tanggal standar: YYYY-MM-DD")})
