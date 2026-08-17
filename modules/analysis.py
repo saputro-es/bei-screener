@@ -161,7 +161,7 @@ def _horizon_strength(row: pd.Series) -> tuple[float, int, int]:
         if pct >= 75:
             score += 2.0 * weight
             strong += 1
-        elif pct > 65:
+        elif pct >= 65:
             score += 1.0 * weight
         elif pct >= 50:
             score += 0.25 * weight
@@ -259,7 +259,7 @@ def classify_stock(history: pd.DataFrame, accumulation: pd.Series, orderbook: pd
         quality = "⚠️ Akumulasi kuat tetapi harga sudah panas"
     elif np.isfinite(recent_mean) and np.isfinite(long_mean) and recent_mean >= 65 and long_mean >= 60:
         quality = "✅ Akumulasi sehat lintas horizon"
-    elif np.isfinite(pct3) and pct3 > 65:
+    elif np.isfinite(pct3) and pct3 >= 65:
         quality = "🟡 Akumulasi baru; cek konfirmasi horizon panjang"
     else:
         quality = "⚠️ Perlu konfirmasi harga/volume"
@@ -308,6 +308,6 @@ def screen(df: pd.DataFrame, threshold: float = 65.0, orderbook: pd.DataFrame | 
     if result.empty:
         return result
     result = result[result["days_available_3d"] >= 3]
-    result = result[result["net_buy_pct_3d"] > threshold].copy()
+    result = result[result["net_buy_pct_3d"] >= threshold].copy()
     result = result[result["close_price"].notna()].copy()
     return result.sort_values(["score", "net_buy_pct_3d"], ascending=[False, False]).reset_index(drop=True)
