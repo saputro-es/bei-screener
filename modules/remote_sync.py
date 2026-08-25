@@ -5,16 +5,27 @@ import sqlite3
 import time
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .database import DAILY_ORDERBOOK_COLUMNS, DATABASE_FILE, ORDERBOOK_COLUMNS, init_database
 from .supabase_persistence import _headers, config
 
-PAGE_SIZE = 1000
-TIMEOUT_SECONDS = 60
+PAGE_SIZE = 250
+TIMEOUT_SECONDS = 45
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 SQLITE_RETRIES = 4
+HTTP_RETRIES = 5
 CANONICAL_DAILY_TABLE = "canonical_stock_daily"
 CANONICAL_ORDERBOOK_TABLE = "canonical_orderbook_snapshot"
+
+
+def _session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(total=HTTP_RETRIES, connect=HTTP_RETRIES, read=HTTP_RETRIES, status=HTTP_RETRIES, backoff_factor=1.5, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=frozenset({"GET"}), respect_retry_after_header=True, raise_on_status=False)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=8, pool_block=True)
+    session.mount("https://", adapter)
+    return session
 
 
 def _connect_local() -> sqlite3.Connection:
@@ -24,7 +35,11 @@ def _connect_local() -> sqlite3.Connection:
 
 
 def _get_page(cfg: dict[str, str | bool], table: str, offset: int) -> list[dict]:
-    response = requests.get(f"{cfg['url']}/rest/v1/{table}", headers={**_headers(str(cfg['key'])), "Prefer": "count=exact"}, params={"select": "*", "order": "id.asc", "limit": PAGE_SIZE, "offset": offset}, timeout=TIMEOUT_SECONDS)
+    try:
+        with _session() as session:
+            response = session.get(f"{cfg['url']}/rest/v1/{table}", headers={**_headers(str(cfg['key'])), "Prefer": "count=exact"}, params={"select": "*", "order": "id.asc", "limit": PAGE_SIZE, "offset": offset}, timeout=TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Supabase {table} network error setelah retry: {exc}") from exc
     if response.status_code >= 400:
         raise RuntimeError(f"Supabase {table} {response.status_code}: {response.text[:1000]}")
     body = response.json()
@@ -59,7 +74,11 @@ def _local_signature() -> tuple[int, str | None]:
 
 
 def _remote_signature(cfg: dict[str, str | bool]) -> tuple[int, str | None]:
-    response = requests.get(f"{cfg['url']}/rest/v1/{CANONICAL_DAILY_TABLE}", headers={**_headers(str(cfg['key'])), "Prefer": "count=exact"}, params={"select": "id,trade_date", "order": "trade_date.desc", "limit": 1}, timeout=TIMEOUT_SECONDS)
+    try:
+        with _session() as session:
+            response = session.get(f"{cfg['url']}/rest/v1/{CANONICAL_DAILY_TABLE}", headers={**_headers(str(cfg['key'])), "Prefer": "count=exact"}, params={"select": "id,trade_date", "order": "trade_date.desc", "limit": 1}, timeout=TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Supabase {CANONICAL_DAILY_TABLE} network error setelah retry: {exc}") from exc
     if response.status_code >= 400:
         raise RuntimeError(f"Supabase {CANONICAL_DAILY_TABLE} {response.status_code}: {response.text[:1000]}")
     total = None
@@ -124,9 +143,7 @@ def sync_local_from_supabase(force: bool = False) -> dict[str, object]:
         local_count, local_latest = _local_signature()
         remote_count, remote_latest = _remote_signature(cfg)
     except Exception as exc:
-        if local_count > 0:
-            return {"synced": False, "reason": "remote_unavailable", "local_rows": local_count, "local_latest": local_latest, "error": str(exc)}
-        return {"synced": False, "reason": "remote_unavailable_no_local", "error": str(exc)}
+        return {"synced": False, "reason": "remote_unavailable" if local_count > 0 else "remote_unavailable_no_local", "local_rows": local_count, "local_latest": local_latest, "error": str(exc)}
     if local_count == remote_count and local_latest == remote_latest:
         return {"synced": False, "reason": "already_current", "rows": local_count, "latest_date": local_latest}
     try:
@@ -134,4 +151,4 @@ def sync_local_from_supabase(force: bool = False) -> dict[str, object]:
     except Exception as exc:
         if local_count > 0:
             return {"synced": False, "reason": "remote_reconcile_failed", "local_rows": local_count, "local_latest": local_latest, "remote_rows": remote_count, "remote_latest": remote_latest, "error": str(exc)}
-        raise
+        return {"synced": False, "reason": "remote_reconcile_failed_no_local", "error": str(exc)}
