@@ -15,6 +15,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # from Supabase when configured. BEI_DB_DIR can override this for local deployments.
 DATABASE_DIR = Path(os.getenv("BEI_DB_DIR", "/tmp/bei-screener"))
 DATABASE_FILE = DATABASE_DIR / "bei_screener.db"
+SQLITE_TIMEOUT_SECONDS = 60
+SQLITE_BUSY_TIMEOUT_MS = 60000
+
+
+def _connect() -> sqlite3.Connection:
+    """Open a Streamlit-Cloud-safe SQLite connection."""
+    DATABASE_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DATABASE_FILE, timeout=SQLITE_TIMEOUT_SECONDS)
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
 
 COLUMN_ALIASES = {
     "trade_date": ["Tanggal Perdagangan Terakhir", "Tanggal", "Trade Date", "Date"],
@@ -206,7 +218,7 @@ def _migrate_orderbook_schema(conn: sqlite3.Connection) -> None:
 
 def init_database() -> None:
     DATABASE_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DATABASE_FILE) as conn:
+    with _connect() as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, company_name TEXT, open_price REAL, high_price REAL, low_price REAL, close_price REAL, volume REAL, value REAL, frequency REAL, foreign_sell REAL, foreign_buy REAL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(trade_date, stock_code))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS orderbook_snapshot (id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_date TEXT NOT NULL, snapshot_time TEXT NOT NULL DEFAULT '00:00:00', stock_code TEXT NOT NULL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(snapshot_date, snapshot_time, stock_code))""")
         _migrate_schema(conn)
@@ -275,7 +287,7 @@ def load_data(stock_code: str | None = None, days: int | None = None) -> pd.Data
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY trade_date ASC, stock_code ASC"
-    with sqlite3.connect(DATABASE_FILE) as conn:
+    with _connect() as conn:
         return pd.read_sql_query(query, conn, params=params)
 
 
@@ -287,7 +299,7 @@ def load_orderbook(stock_code: str | None = None, latest_only: bool = False) -> 
         query += " WHERE stock_code = ?"
         params.append(str(stock_code).upper())
     query += " ORDER BY snapshot_date ASC, snapshot_time ASC, stock_code ASC"
-    with sqlite3.connect(DATABASE_FILE) as conn:
+    with _connect() as conn:
         data = pd.read_sql_query(query, conn, params=params)
     if latest_only and not data.empty:
         data = data.sort_values(["snapshot_date", "snapshot_time"]).groupby("stock_code", as_index=False).tail(1)
@@ -296,7 +308,7 @@ def load_orderbook(stock_code: str | None = None, latest_only: bool = False) -> 
 
 def database_info() -> dict[str, int]:
     init_database()
-    with sqlite3.connect(DATABASE_FILE) as conn:
+    with _connect() as conn:
         total_rows = int(conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0])
         total_stocks = int(conn.execute("SELECT COUNT(DISTINCT stock_code) FROM stock_daily").fetchone()[0])
         total_days = int(conn.execute("SELECT COUNT(DISTINCT trade_date) FROM stock_daily").fetchone()[0])
