@@ -149,8 +149,7 @@ with st.sidebar:
     st.divider()
     st.subheader("💾 Penyimpanan durable")
     if not persistence_cfg["enabled"]:
-        st.error("Belum aktif. Upload dikunci agar data tidak hilang saat redeploy.")
-        st.caption("Tambahkan SUPABASE_SECRET_KEY untuk primary Supabase, atau GITHUB_TOKEN untuk secondary recovery snapshot.")
+        st.warning("Persistent storage belum aktif. Upload tetap dapat diproses ke SQLite sesi ini, tetapi data lokal dapat hilang saat redeploy. Untuk penyimpanan permanen, tambahkan SUPABASE_SECRET_KEY atau GITHUB_TOKEN ke Streamlit Secrets.")
     elif restore_result.get("restored"):
         st.success(f"Database dipulihkan: {int(restore_result.get('rows', 0)):,} baris")
         st.caption(_persistence_summary(persistence_info))
@@ -176,7 +175,7 @@ st.caption(
 )
 
 if not persistence_cfg["enabled"]:
-    st.warning("🔒 Upload sementara dikunci. Kita tidak akan mengulangi kejadian data hilang: aktifkan Persistent Storage terlebih dahulu.")
+    st.warning("⚠️ Upload tetap tersedia sebagai fallback lokal. Setelah upload, aktifkan Persistent Storage agar histori tidak hilang saat aplikasi di-redeploy.")
 
 if "upload_generation" not in st.session_state:
     st.session_state.upload_generation = 0
@@ -187,14 +186,14 @@ files = st.file_uploader(
     type=["xlsx", "xls"],
     accept_multiple_files=True,
     key=upload_key,
-    disabled=not persistence_cfg["enabled"],
+    disabled=False,
     help=f"Pilih hingga {MAX_FILES_PER_BATCH} file. File lama yang dipilih ulang akan masuk mode repair, bukan membuat upload ledger baru.",
 )
 
 if files:
     st.success(f"📎 {len(files)} file siap diproses: " + ", ".join(file.name for file in files))
 
-submitted = st.button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not persistence_cfg["enabled"] or not files)
+submitted = st.button("🚀 Proses Upload", type="primary", use_container_width=True, disabled=not files)
 
 if submitted:
     if not files:
@@ -238,20 +237,28 @@ if submitted:
                 if already_uploaded and not new_entries:
                     repair_result = repair_frames(all_frames)
                     result = save_upload_batch(all_frames, file_records)
-                    backup_result = backup_database()
-                    message = f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. Ledger tidak bertambah. {_backup_confirmation(backup_result)}"
+                    try:
+                        backup_result = backup_database()
+                        persistence_message = _backup_confirmation(backup_result)
+                    except Exception as backup_exc:
+                        persistence_message = f"⚠️ Backup durable belum berhasil: {backup_exc}. Data sudah tersimpan di SQLite sesi ini."
+                    message = f"🔧 Historical repair selesai: {repair_result['daily_updated']:,} field-row diperiksa/diperbaiki dan {repair_result['orderbook_updated']:,} snapshot diperiksa/diperbaiki. Ledger tidak bertambah. {persistence_message}"
                     st.session_state.upload_notice = {"kind": "success", "message": message}
                 else:
                     result = save_upload_batch(all_frames, file_records)
-                    backup_result = backup_database()
-                    message = f"💾 Selesai dan aman: {result['files_saved']} file | {result['rows_saved']:,} baris unik disimpan/di-update | {result['orderbook_rows']:,} snapshot orderbook | {_backup_confirmation(backup_result)}"
+                    try:
+                        backup_result = backup_database()
+                        persistence_message = _backup_confirmation(backup_result)
+                    except Exception as backup_exc:
+                        persistence_message = f"⚠️ Backup durable belum berhasil: {backup_exc}. Data sudah tersimpan di SQLite sesi ini."
+                    message = f"💾 Upload selesai: {result['files_saved']} file | {result['rows_saved']:,} baris unik disimpan/di-update | {result['orderbook_rows']:,} snapshot orderbook | {persistence_message}"
                     st.session_state.upload_notice = {"kind": "success", "message": message}
             progress.empty()
             st.session_state.upload_generation += 1
             st.rerun()
         except Exception as exc:
             progress.empty()
-            st.session_state.upload_notice = {"kind": "error", "message": "❌ Batch belum dianggap selesai karena persistence/backup gagal. Data tidak akan kami anggap aman sebelum primary durable store berhasil: " + str(exc)}
+            st.session_state.upload_notice = {"kind": "error", "message": "❌ Upload belum selesai karena proses penyimpanan utama gagal: " + str(exc)}
             st.rerun()
 
 st.divider()
