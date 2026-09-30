@@ -5,6 +5,12 @@ import os
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from pathlib import Path
 from typing import Iterable
 
@@ -18,6 +24,24 @@ DATABASE_DIR = Path(os.getenv("BEI_DB_DIR", "/tmp/bei-screener"))
 DATABASE_FILE = DATABASE_DIR / "bei_screener.db"
 SQLITE_TIMEOUT_SECONDS = 60
 SQLITE_BUSY_TIMEOUT_MS = 60000
+INIT_LOCK_FILE = DATABASE_DIR / ".database-init.lock"
+
+
+@contextmanager
+def _database_init_lock():
+    DATABASE_DIR.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:
+        yield
+        return
+    lock_handle = INIT_LOCK_FILE.open("a+")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_handle.close()
 
 
 def _connect() -> sqlite3.Connection:
@@ -216,40 +240,45 @@ def _migrate_orderbook_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_orderbook_snapshot_key ON orderbook_snapshot(snapshot_date, snapshot_time, stock_code)")
 
 
+def _create_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, company_name TEXT, open_price REAL, high_price REAL, low_price REAL, close_price REAL, volume REAL, value REAL, frequency REAL, foreign_sell REAL, foreign_buy REAL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(trade_date, stock_code))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS orderbook_snapshot (id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_date TEXT NOT NULL, snapshot_time TEXT NOT NULL DEFAULT '00:00:00', stock_code TEXT NOT NULL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(snapshot_date, snapshot_time, stock_code))""")
+    _migrate_schema(conn)
+    _migrate_orderbook_schema(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_date ON stock_daily(trade_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_code_time ON orderbook_snapshot(stock_code, snapshot_date, snapshot_time)")
+
 def init_database() -> None:
+    """Initialize SQLite safely under concurrent Streamlit sessions."""
     DATABASE_DIR.mkdir(parents=True, exist_ok=True)
     last_error = None
-    for attempt in range(5):
-        conn = None
-        try:
-            conn = _connect()
-            conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, company_name TEXT, open_price REAL, high_price REAL, low_price REAL, close_price REAL, volume REAL, value REAL, frequency REAL, foreign_sell REAL, foreign_buy REAL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(trade_date, stock_code))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS orderbook_snapshot (id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_date TEXT NOT NULL, snapshot_time TEXT NOT NULL DEFAULT '00:00:00', stock_code TEXT NOT NULL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(snapshot_date, snapshot_time, stock_code))""")
-            _migrate_schema(conn)
-            _migrate_orderbook_schema(conn)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_date ON stock_daily(trade_date)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_code_time ON orderbook_snapshot(stock_code, snapshot_date, snapshot_time)")
-            conn.commit()
-            return
-        except sqlite3.OperationalError as exc:
-            last_error = exc
-            if conn is not None:
-                try:
-                    conn.rollback()
-                except sqlite3.Error:
-                    pass
-            message = str(exc).lower()
-            retryable = any(token in message for token in ("locked", "busy", "disk i/o", "malformed"))
-            if not retryable or attempt == 4:
-                raise
-            time.sleep(0.5 * (attempt + 1))
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except sqlite3.Error:
-                    pass
+    with _database_init_lock():
+        for attempt in range(8):
+            conn = None
+            try:
+                conn = _connect()
+                _create_schema(conn)
+                conn.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                last_error = exc
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                message = str(exc).lower()
+                retryable = any(token in message for token in ("locked", "busy", "disk i/o"))
+                if not retryable or attempt == 7:
+                    raise
+                time.sleep(min(2.0, 0.25 * (attempt + 1)))
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except sqlite3.Error:
+                        pass
     if last_error is not None:
         raise last_error
 
