@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -9,7 +10,10 @@ from typing import Iterable
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATABASE_DIR = BASE_DIR / "database"
+# Streamlit Cloud source directories are not a reliable SQLite write location.
+# Keep the runtime database in a writable directory; durable history is restored
+# from Supabase when configured. BEI_DB_DIR can override this for local deployments.
+DATABASE_DIR = Path(os.getenv("BEI_DB_DIR", "/tmp/bei-screener"))
 DATABASE_FILE = DATABASE_DIR / "bei_screener.db"
 
 COLUMN_ALIASES = {
