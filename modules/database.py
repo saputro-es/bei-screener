@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -24,7 +25,6 @@ def _connect() -> sqlite3.Connection:
     DATABASE_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DATABASE_FILE, timeout=SQLITE_TIMEOUT_SECONDS)
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
@@ -218,16 +218,40 @@ def _migrate_orderbook_schema(conn: sqlite3.Connection) -> None:
 
 def init_database() -> None:
     DATABASE_DIR.mkdir(parents=True, exist_ok=True)
-    with _connect() as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, company_name TEXT, open_price REAL, high_price REAL, low_price REAL, close_price REAL, volume REAL, value REAL, frequency REAL, foreign_sell REAL, foreign_buy REAL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(trade_date, stock_code))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS orderbook_snapshot (id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_date TEXT NOT NULL, snapshot_time TEXT NOT NULL DEFAULT '00:00:00', stock_code TEXT NOT NULL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(snapshot_date, snapshot_time, stock_code))""")
-        _migrate_schema(conn)
-        _migrate_orderbook_schema(conn)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_date ON stock_daily(trade_date)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_code_time ON orderbook_snapshot(stock_code, snapshot_date, snapshot_time)")
-        conn.commit()
-
+    last_error = None
+    for attempt in range(5):
+        conn = None
+        try:
+            conn = _connect()
+            conn.execute("""CREATE TABLE IF NOT EXISTS stock_daily (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, company_name TEXT, open_price REAL, high_price REAL, low_price REAL, close_price REAL, volume REAL, value REAL, frequency REAL, foreign_sell REAL, foreign_buy REAL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(trade_date, stock_code))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS orderbook_snapshot (id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_date TEXT NOT NULL, snapshot_time TEXT NOT NULL DEFAULT '00:00:00', stock_code TEXT NOT NULL, raw_data TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(snapshot_date, snapshot_time, stock_code))""")
+            _migrate_schema(conn)
+            _migrate_orderbook_schema(conn)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_daily(stock_code, trade_date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_date ON stock_daily(trade_date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_code_time ON orderbook_snapshot(stock_code, snapshot_date, snapshot_time)")
+            conn.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+            message = str(exc).lower()
+            retryable = any(token in message for token in ("locked", "busy", "disk i/o", "malformed"))
+            if not retryable or attempt == 4:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+    if last_error is not None:
+        raise last_error
 
 def save_orderbook(df: pd.DataFrame) -> int:
     data = normalize_orderbook_dataframe(df)
@@ -236,7 +260,7 @@ def save_orderbook(df: pd.DataFrame) -> int:
     init_database()
     value_columns = [c for c in ORDERBOOK_COLUMNS if c not in {"snapshot_date", "snapshot_time", "stock_code"}]
     saved = 0
-    with sqlite3.connect(DATABASE_FILE) as conn:
+    with _connect() as conn:
         for _, row in data.iterrows():
             raw_data = json.dumps(row.to_dict(), default=str, ensure_ascii=False)
             values = tuple(_db_value(row.get(c)) for c in ORDERBOOK_COLUMNS) + (raw_data,)
